@@ -14,15 +14,6 @@ export default function InventoryValuation({ userRole }) {
     return unsub;
   }, []);
 
-  if (userRole !== 'admin' && userRole !== 'inventory_manager') {
-    return (
-      <div className="max-w-md mx-auto mt-20 text-center text-gray-500">
-        <ShieldAlert className="mx-auto mb-3 text-gray-400" size={40} />
-        <p>Inventory Valuation is restricted to Admin and Inventory Manager users.</p>
-      </div>
-    );
-  }
-
   const stats = useMemo(() => {
     let totalValue = 0;
     let availableStock = 0;
@@ -38,6 +29,15 @@ export default function InventoryValuation({ userRole }) {
     });
     return { totalValue, availableStock, lowStock, outOfStock };
   }, [items]);
+
+  if (userRole !== 'admin' && userRole !== 'inventory_manager') {
+    return (
+      <div className="max-w-md mx-auto mt-20 text-center text-gray-500">
+        <ShieldAlert className="mx-auto mb-3 text-gray-400" size={40} />
+        <p>Inventory Valuation is restricted to Admin and Inventory Manager users.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
