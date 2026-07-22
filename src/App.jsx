@@ -68,7 +68,7 @@ export default function App() {
       case 'items':
         return <ManageItems userRole={userRole} />;
       case 'import':
-        return <ImportData userRole={userRole} />;
+        return <ImportData userRole={userRole} userEmail={user.email} />;
       case 'adjustment':
         return <StockAdjustment userRole={userRole} userEmail={user.email} />;
       case 'reports':
