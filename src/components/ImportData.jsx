@@ -1,8 +1,25 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { db, auth } from '../firebase';
-import { collection, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
+import {
+  collection,
+  onSnapshot,
+  addDoc,
+  doc,
+  runTransaction,
+  serverTimestamp,
+} from 'firebase/firestore';
 import * as XLSX from 'xlsx';
-import { UploadCloud, ShieldAlert, Trash2, FileSpreadsheet, ScanLine, Loader2, CheckCircle2 } from 'lucide-react';
+import {
+  UploadCloud,
+  ShieldAlert,
+  Trash2,
+  FileSpreadsheet,
+  ScanLine,
+  Loader2,
+  CheckCircle2,
+  PackagePlus,
+  ArrowLeftRight,
+} from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 
 const FIELD_ALIASES = {
@@ -14,6 +31,13 @@ const FIELD_ALIASES = {
   avgCost: ['avg cost', 'average cost', 'rate', 'price', 'unit cost', 'unit price', 'cost'],
   reorderLevel: ['reorder level', 'reorder', 'min level', 'minimum stock', 'min stock'],
 };
+
+const MOVEMENT_TYPES = [
+  { id: 'purchase', label: 'Purchase (In)', direction: 'in' },
+  { id: 'return', label: 'Return (In)', direction: 'in' },
+  { id: 'issue', label: 'Issue (Out)', direction: 'out' },
+  { id: 'dc', label: 'Delivery Challan / Sale (Out)', direction: 'out' },
+];
 
 function normalizeHeader(h) {
   return String(h || '').trim().toLowerCase();
@@ -56,14 +80,55 @@ function fileToBase64(file) {
   });
 }
 
-export default function ImportData({ userRole }) {
+function findBestMatch(name, existingItems) {
+  const target = String(name || '').trim().toLowerCase();
+  if (!target) return null;
+  let match = existingItems.find((it) => it.particulars?.trim().toLowerCase() === target);
+  if (match) return match;
+  match = existingItems.find(
+    (it) =>
+      it.particulars?.trim().toLowerCase().includes(target) ||
+      target.includes(it.particulars?.trim().toLowerCase())
+  );
+  return match || null;
+}
+
+async function extractRowsFromFile(file) {
+  const isSpreadsheet = /\.(xlsx|xls|csv)$/i.test(file.name);
+  const isPdf = file.type === 'application/pdf';
+  const isImage = file.type.startsWith('image/');
+
+  if (isSpreadsheet) {
+    const buffer = await file.arrayBuffer();
+    const wb = XLSX.read(buffer, { type: 'array' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: null });
+    return rawRows.map(mapRow).filter((r) => r.particulars);
+  }
+
+  if (isPdf || isImage) {
+    if (!SCAN_BACKEND_URL || SCAN_BACKEND_URL.includes('YOUR-')) {
+      throw new Error('The AI scanning backend is not configured yet.');
+    }
+    const base64Data = await fileToBase64(file);
+    const response = await fetch(`${SCAN_BACKEND_URL}/api/extract`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mimeType: file.type || 'application/pdf', base64Data }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'AI extraction failed.');
+    }
+    return (data.items || []).map(normalizeAiItem).filter((r) => r.particulars);
+  }
+
+  throw new Error('Unsupported file type. Upload an Excel/CSV file, a photo (JPG/PNG), or a PDF.');
+}
+
+export default function ImportData({ userRole, userEmail }) {
+  const [mode, setMode] = useState('newItems'); // 'newItems' | 'movement'
   const [existingItems, setExistingItems] = useState([]);
-  const [rows, setRows] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-  const [sourceLabel, setSourceLabel] = useState('');
-  const fileInputRef = useRef(null);
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'items'), (snap) => {
@@ -81,6 +146,49 @@ export default function ImportData({ userRole }) {
     );
   }
 
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-3">
+        <ScanLine className="text-emerald-700" size={28} />
+        <h1 className="text-3xl font-bold text-gray-800">Import Data</h1>
+      </div>
+
+      <div className="flex gap-2 bg-gray-100 rounded-lg p-1 w-fit">
+        <button
+          onClick={() => setMode('newItems')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+            mode === 'newItems' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <PackagePlus size={16} /> Add New Items
+        </button>
+        <button
+          onClick={() => setMode('movement')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+            mode === 'movement' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <ArrowLeftRight size={16} /> Record Purchase / Issue / DC
+        </button>
+      </div>
+
+      {mode === 'newItems' ? (
+        <NewItemsImport existingItems={existingItems} />
+      ) : (
+        <MovementImport existingItems={existingItems} userEmail={userEmail} />
+      )}
+    </div>
+  );
+}
+
+function NewItemsImport({ existingItems }) {
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [sourceLabel, setSourceLabel] = useState('');
+  const fileInputRef = useRef(null);
+
   const handleFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -88,47 +196,13 @@ export default function ImportData({ userRole }) {
     setSuccess('');
     setRows([]);
     setSourceLabel(file.name);
-
-    const isSpreadsheet = /\.(xlsx|xls|csv)$/i.test(file.name);
-    const isPdf = file.type === 'application/pdf';
-    const isImage = file.type.startsWith('image/');
-
+    setBusy(true);
     try {
-      if (isSpreadsheet) {
-        setBusy(true);
-        const buffer = await file.arrayBuffer();
-        const wb = XLSX.read(buffer, { type: 'array' });
-        const sheet = wb.Sheets[wb.SheetNames[0]];
-        const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: null });
-        const mapped = rawRows.map(mapRow).filter((r) => r.particulars);
-        if (mapped.length === 0) {
-          setError('No recognizable item rows found in that spreadsheet. Check the column headers.');
-        }
-        setRows(mapped);
-      } else if (isPdf || isImage) {
-        if (!SCAN_BACKEND_URL || SCAN_BACKEND_URL.includes('YOUR-')) {
-          setError('The AI scanning backend is not configured yet.');
-          return;
-        }
-        setBusy(true);
-        const base64Data = await fileToBase64(file);
-        const response = await fetch(`${SCAN_BACKEND_URL}/api/extract`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ mimeType: file.type || 'application/pdf', base64Data }),
-        });
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error || 'AI extraction failed.');
-        }
-        const mapped = (data.items || []).map(normalizeAiItem).filter((r) => r.particulars);
-        if (mapped.length === 0) {
-          setError('The AI could not find any recognizable stock items in that file.');
-        }
-        setRows(mapped);
-      } else {
-        setError('Unsupported file type. Upload an Excel/CSV file, a photo (JPG/PNG), or a PDF.');
+      const mapped = await extractRowsFromFile(file);
+      if (mapped.length === 0) {
+        setError('No recognizable item rows found in that file.');
       }
+      setRows(mapped);
     } catch (err) {
       setError(err.message || 'Failed to read that file.');
     } finally {
@@ -218,14 +292,10 @@ export default function ImportData({ userRole }) {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <ScanLine className="text-emerald-700" size={28} />
-        <h1 className="text-3xl font-bold text-gray-800">Import Data</h1>
-      </div>
       <p className="text-gray-500 text-sm max-w-2xl">
-        Upload an Excel/CSV stock list for instant import, or a photo/PDF of a paper stock register, invoice, or
-        price list — an AI model will read it and extract the item rows for you to review before anything is
-        saved.
+        Upload an Excel/CSV stock list for instant import, or a photo/PDF of a paper stock register or price list —
+        an AI model will read it and extract new items (with an opening quantity) for you to review before
+        anything is saved.
       </p>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
@@ -340,6 +410,279 @@ export default function ImportData({ userRole }) {
                       className="w-20 px-2 py-1 border rounded"
                     />
                   </td>
+                  <td className="px-2 py-1">
+                    <button onClick={() => removeRow(idx)} className="text-red-500 hover:text-red-700" title="Remove row">
+                      <Trash2 size={16} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MovementImport({ existingItems, userEmail }) {
+  const [movementType, setMovementType] = useState('purchase');
+  const [rows, setRows] = useState([]);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [sourceLabel, setSourceLabel] = useState('');
+  const fileInputRef = useRef(null);
+
+  const movement = MOVEMENT_TYPES.find((m) => m.id === movementType);
+  const showUnitCost = movementType === 'purchase';
+
+  const itemOptions = useMemo(
+    () => [...existingItems].sort((a, b) => (a.particulars || '').localeCompare(b.particulars || '')),
+    [existingItems]
+  );
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError('');
+    setSuccess('');
+    setRows([]);
+    setSourceLabel(file.name);
+    setReason(file.name.replace(/\.[^/.]+$/, ''));
+    setBusy(true);
+    try {
+      const mapped = await extractRowsFromFile(file);
+      if (mapped.length === 0) {
+        setError('No recognizable item rows found in that file.');
+      }
+      const withMatches = mapped.map((r) => {
+        const match = findBestMatch(r.particulars, existingItems);
+        return {
+          particulars: r.particulars,
+          quantity: r.quantity ?? '',
+          unitCost: r.avgCost ?? '',
+          itemId: match ? match.id : '',
+        };
+      });
+      setRows(withMatches);
+    } catch (err) {
+      setError(err.message || 'Failed to read that file.');
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const updateRow = (idx, field, value) => {
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
+  };
+
+  const removeRow = (idx) => {
+    setRows((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleRecord = async () => {
+    setError('');
+    setSuccess('');
+    const withQty = rows.filter((r) => Number(r.quantity) > 0);
+    if (withQty.length === 0) {
+      setError('Enter a quantity greater than 0 for at least one row.');
+      return;
+    }
+    const matched = withQty.filter((r) => r.itemId);
+    const unmatched = withQty.filter((r) => !r.itemId);
+
+    if (matched.length === 0) {
+      setError('None of these rows are matched to an existing item. Select an item for each row, or add the item first via Manage Items.');
+      return;
+    }
+
+    setBusy(true);
+    let recorded = 0;
+    const failed = [];
+    try {
+      for (const r of matched) {
+        const qty = Number(r.quantity);
+        try {
+          await runTransaction(db, async (tx) => {
+            const itemRef = doc(db, 'items', r.itemId);
+            const itemSnap = await tx.get(itemRef);
+            if (!itemSnap.exists()) throw new Error('Item no longer exists.');
+            const current = Number(itemSnap.data().currentStock || 0);
+            const delta = movement.direction === 'in' ? qty : -qty;
+            const newStock = current + delta;
+            if (newStock < 0) {
+              throw new Error(`${itemSnap.data().particulars}: would make stock negative (current ${current}, qty ${qty}).`);
+            }
+
+            const updates = { currentStock: newStock, updatedAt: serverTimestamp() };
+            if (movement.id === 'purchase' && r.unitCost) {
+              updates.avgCost = Number(r.unitCost);
+            }
+            tx.update(itemRef, updates);
+
+            const txnRef = doc(collection(db, 'transactions'));
+            tx.set(txnRef, {
+              itemId: r.itemId,
+              itemName: itemSnap.data().particulars,
+              type: movement.id,
+              direction: movement.direction,
+              quantity: qty,
+              unitCost: r.unitCost ? Number(r.unitCost) : null,
+              reason: reason.trim() || `Imported from ${sourceLabel}`,
+              performedByEmail: userEmail || '',
+              createdAt: serverTimestamp(),
+            });
+          });
+          recorded += 1;
+        } catch (err) {
+          failed.push(err.message);
+        }
+      }
+
+      let message = `Recorded ${recorded} of ${matched.length} matched movement(s).`;
+      if (unmatched.length) {
+        message += ` ${unmatched.length} row(s) had no matching item and were skipped: ${unmatched
+          .map((r) => r.particulars)
+          .join(', ')}.`;
+      }
+      if (failed.length) {
+        message += ` ${failed.length} failed: ${failed.join(' ')}`;
+      }
+      setSuccess(message);
+      setRows((prev) => prev.filter((r) => !matched.includes(r) || failed.some((f) => f.includes(r.particulars))));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <p className="text-gray-500 text-sm max-w-2xl">
+        Upload a purchase invoice, delivery challan / sale document, or an Excel/CSV of movement lines. Each row is
+        matched to an existing item by name — review and correct the match, quantity, and (for purchases) unit
+        cost before recording. This updates stock and writes to the ledger, it does not create new items.
+      </p>
+
+      <div className="bg-white rounded-lg shadow p-6 space-y-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Movement Type</label>
+          <select
+            value={movementType}
+            onChange={(e) => setMovementType(e.target.value)}
+            className="px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+          >
+            {MOVEMENT_TYPES.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white px-4 py-2 rounded-lg cursor-pointer">
+            <UploadCloud size={18} />
+            Choose File
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls,.csv,image/*,application/pdf"
+              onChange={handleFile}
+              className="hidden"
+            />
+          </label>
+          <span className="text-sm text-gray-500 flex items-center gap-2">
+            <FileSpreadsheet size={16} /> Excel / CSV, or
+            <ScanLine size={16} /> photo / PDF (AI scan)
+          </span>
+          {busy && (
+            <span className="text-sm text-emerald-700 flex items-center gap-2">
+              <Loader2 size={16} className="animate-spin" /> Processing {sourceLabel}...
+            </span>
+          )}
+        </div>
+
+        {rows.length > 0 && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Reason / Reference (applies to all rows)</label>
+            <input
+              type="text"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              className="w-full max-w-md px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+              placeholder="Invoice no., customer, notes..."
+            />
+          </div>
+        )}
+
+        {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
+        {success && (
+          <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-2 rounded text-sm flex items-start gap-2">
+            <CheckCircle2 size={16} className="mt-0.5 shrink-0" /> {success}
+          </div>
+        )}
+      </div>
+
+      {rows.length > 0 && (
+        <div className="bg-white rounded-lg shadow overflow-x-auto">
+          <div className="flex items-center justify-between p-4 border-b">
+            <h2 className="font-semibold text-gray-800">Review extracted rows ({rows.length})</h2>
+            <button
+              onClick={handleRecord}
+              disabled={busy}
+              className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg disabled:opacity-50"
+            >
+              {busy ? 'Recording...' : `Record ${rows.length} Movement(s)`}
+            </button>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 border-b">
+              <tr>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Extracted Name</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Matched Item</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Quantity</th>
+                {showUnitCost && <th className="text-left px-3 py-2 font-semibold text-gray-600">Unit Cost</th>}
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, idx) => (
+                <tr key={idx} className="border-b last:border-0">
+                  <td className="px-2 py-1 text-gray-600">{r.particulars}</td>
+                  <td className="px-2 py-1">
+                    <select
+                      value={r.itemId}
+                      onChange={(e) => updateRow(idx, 'itemId', e.target.value)}
+                      className={`w-56 px-2 py-1 border rounded ${!r.itemId ? 'border-red-300 text-red-600' : ''}`}
+                    >
+                      <option value="">No match — select item...</option>
+                      {itemOptions.map((it) => (
+                        <option key={it.id} value={it.id}>{it.particulars} (stock: {it.currentStock})</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-2 py-1">
+                    <input
+                      type="number"
+                      value={r.quantity}
+                      onChange={(e) => updateRow(idx, 'quantity', e.target.value)}
+                      className="w-24 px-2 py-1 border rounded"
+                    />
+                  </td>
+                  {showUnitCost && (
+                    <td className="px-2 py-1">
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={r.unitCost}
+                        onChange={(e) => updateRow(idx, 'unitCost', e.target.value)}
+                        className="w-24 px-2 py-1 border rounded"
+                      />
+                    </td>
+                  )}
                   <td className="px-2 py-1">
                     <button onClick={() => removeRow(idx)} className="text-red-500 hover:text-red-700" title="Remove row">
                       <Trash2 size={16} />
