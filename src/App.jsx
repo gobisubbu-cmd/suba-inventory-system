@@ -6,6 +6,7 @@ import Login from './components/Login';
 import Navigation from './components/Navigation';
 import Dashboard from './components/Dashboard';
 import ManageItems from './components/ManageItems';
+import ImportData from './components/ImportData';
 import StockAdjustment from './components/StockAdjustment';
 import Reports from './components/Reports';
 import InventoryValuation from './components/InventoryValuation';
@@ -66,6 +67,8 @@ export default function App() {
         return <Dashboard userRole={userRole} />;
       case 'items':
         return <ManageItems userRole={userRole} />;
+      case 'import':
+        return <ImportData userRole={userRole} />;
       case 'adjustment':
         return <StockAdjustment userRole={userRole} userEmail={user.email} />;
       case 'reports':
