@@ -9,3 +9,10 @@ root.render(
     <App />
   </React.StrictMode>
 );
+
+// Register service worker so the portal can be installed as a mobile app
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}

@@ -13,6 +13,8 @@ import InventoryValuation from './components/InventoryValuation';
 import ManageUsers from './components/ManageUsers';
 import DangerZone from './components/DangerZone';
 import ChangePassword from './components/ChangePassword';
+import SpareSearch from './components/SpareSearch';
+import AuditDashboard from './components/AuditDashboard';
 import './index.css';
 
 export default function App() {
@@ -75,6 +77,10 @@ export default function App() {
         return <Reports userRole={userRole} />;
       case 'valuation':
         return <InventoryValuation userRole={userRole} />;
+      case 'sparesearch':
+        return <SpareSearch userRole={userRole} userEmail={user.email} />;
+      case 'audit':
+        return <AuditDashboard userRole={userRole} userEmail={user.email} />;
       case 'users':
         return <ManageUsers userRole={userRole} />;
       case 'danger':
