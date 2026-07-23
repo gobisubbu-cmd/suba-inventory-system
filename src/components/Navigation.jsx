@@ -1,7 +1,7 @@
 import React from 'react';
 import { signOut } from 'firebase/auth';
 import { auth } from '../firebase';
-import { LogOut, Home, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine } from 'lucide-react';
+import { LogOut, Home, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList } from 'lucide-react';
 
 const ROLE_LABELS = {
   staff: 'STAFF',
@@ -19,6 +19,8 @@ export default function Navigation({ currentView, onViewChange, userRole, userNa
     { id: 'items', label: 'Manage Items', icon: Boxes, show: userRole === 'admin' || userRole === 'inventory_manager' },
     { id: 'import', label: 'Import Data', icon: ScanLine, show: userRole === 'admin' || userRole === 'inventory_manager' },
     { id: 'adjustment', label: 'Stock Adjustment', icon: SlidersHorizontal, show: userRole === 'admin' },
+    { id: 'sparesearch', label: 'Spare Search', icon: PackageSearch, show: true },
+    { id: 'audit', label: 'Audit Dashboard', icon: ClipboardList, show: userRole === 'admin' },
     { id: 'reports', label: 'Reports', icon: BarChart3, show: true },
     { id: 'valuation', label: 'Inventory Valuation', icon: Wallet, show: userRole === 'admin' || userRole === 'inventory_manager' },
     { id: 'users', label: 'Manage Users', icon: Users, show: userRole === 'admin' },
