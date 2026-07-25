@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
-import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
+import { collection, onSnapshot, orderBy, query, addDoc, serverTimestamp } from 'firebase/firestore';
 import { Search, Package } from 'lucide-react';
 
-export default function Dashboard({ userRole }) {
+export default function Dashboard({ userRole, userEmail }) {
   const [items, setItems] = useState([]);
   const [search, setSearch] = useState('');
   const canSeeValue = userRole === 'admin' || userRole === 'inventory_manager';
@@ -27,6 +27,22 @@ export default function Dashboard({ userRole }) {
         String(it.sno || '').includes(s)
     );
   }, [items, search]);
+
+  // Log searches (debounced) so admin can review demand/gaps later.
+  useEffect(() => {
+    const s = search.trim();
+    if (s.length < 2) return;
+    const handle = setTimeout(() => {
+      addDoc(collection(db, 'searchLogs'), {
+        query: s,
+        resultsCount: filtered.length,
+        userEmail: userEmail || '',
+        createdAt: serverTimestamp(),
+      }).catch(() => {});
+    }, 900);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
 
   const statusFor = (it) => {
     const stock = Number(it.currentStock || 0);
