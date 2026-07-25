@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query, doc, runTransaction, serverTimestamp } from 'firebase/firestore';
 import { SlidersHorizontal, ShieldAlert } from 'lucide-react';
+import { checkAndSendLowStockAlert } from '../lowStockAlert';
 
 export default function StockAdjustment({ userRole, userEmail }) {
   const [items, setItems] = useState([]);
@@ -75,6 +76,7 @@ export default function StockAdjustment({ userRole, userEmail }) {
           createdAt: serverTimestamp(),
         });
       });
+      await checkAndSendLowStockAlert(itemId);
       setSuccess('Stock adjustment recorded.');
       setQuantity('');
       setReason('');
