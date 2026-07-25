@@ -15,6 +15,8 @@ import DangerZone from './components/DangerZone';
 import ChangePassword from './components/ChangePassword';
 import SpareSearch from './components/SpareSearch';
 import AuditDashboard from './components/AuditDashboard';
+import SearchLogs from './components/SearchLogs';
+import Settings from './components/Settings';
 import './index.css';
 
 export default function App() {
@@ -66,7 +68,7 @@ export default function App() {
   const renderView = () => {
     switch (currentView) {
       case 'dashboard':
-        return <Dashboard userRole={userRole} />;
+        return <Dashboard userRole={userRole} userEmail={user.email} />;
       case 'items':
         return <ManageItems userRole={userRole} />;
       case 'import':
@@ -83,6 +85,10 @@ export default function App() {
         return <AuditDashboard userRole={userRole} userEmail={user.email} />;
       case 'users':
         return <ManageUsers userRole={userRole} />;
+      case 'searchlogs':
+        return <SearchLogs userRole={userRole} />;
+      case 'settings':
+        return <Settings userRole={userRole} />;
       case 'danger':
         return <DangerZone userRole={userRole} />;
       case 'changepassword':
