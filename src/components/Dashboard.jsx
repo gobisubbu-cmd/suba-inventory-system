@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query, addDoc, serverTimestamp } from 'firebase/firestore';
-import { Search, Package } from 'lucide-react';
+import { Search, Package, AlertTriangle } from 'lucide-react';
 
 export default function Dashboard({ userRole, userEmail }) {
   const [items, setItems] = useState([]);
@@ -44,6 +44,17 @@ export default function Dashboard({ userRole, userEmail }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
+  // Items at or below their reorder level, worst (most depleted) first.
+  const lowStockItems = useMemo(() => {
+    return items
+      .filter((it) => {
+        const reorder = Number(it.reorderLevel || 0);
+        if (reorder <= 0) return false;
+        return Number(it.currentStock || 0) <= reorder;
+      })
+      .sort((a, b) => Number(a.currentStock || 0) - Number(b.currentStock || 0));
+  }, [items]);
+
   const statusFor = (it) => {
     const stock = Number(it.currentStock || 0);
     const reorder = Number(it.reorderLevel || 0);
@@ -60,6 +71,40 @@ export default function Dashboard({ userRole, userEmail }) {
           <h1 className="text-3xl font-bold text-gray-800">Dashboard</h1>
         </div>
       </div>
+
+      {lowStockItems.length > 0 && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <AlertTriangle className="text-red-600 shrink-0" size={20} />
+            <h2 className="font-bold text-red-800">
+              {lowStockItems.length} item{lowStockItems.length > 1 ? 's need' : ' needs'} reordering
+            </h2>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {lowStockItems.map((it) => {
+              const stock = Number(it.currentStock || 0);
+              const out = stock <= 0;
+              return (
+                <button
+                  key={it.id}
+                  onClick={() => setSearch(it.particulars || '')}
+                  title="Click to filter the table to this item"
+                  className={`text-left px-3 py-2 rounded-lg border text-sm transition hover:shadow ${
+                    out
+                      ? 'bg-red-100 border-red-300 text-red-800'
+                      : 'bg-amber-50 border-amber-300 text-amber-900'
+                  }`}
+                >
+                  <span className="font-semibold">{it.particulars}</span>
+                  <span className="block text-xs mt-0.5">
+                    {out ? 'Out of stock' : `${stock} ${it.unit || ''} left`} · reorder at {it.reorderLevel}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="relative max-w-md">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
