@@ -21,6 +21,7 @@ import {
   ArrowLeftRight,
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
+import { checkAndSendLowStockAlert } from '../lowStockAlert';
 
 const FIELD_ALIASES = {
   particulars: ['particulars', 'item', 'item name', 'name', 'description', 'material'],
@@ -276,6 +277,7 @@ function NewItemsImport({ existingItems }) {
             createdAt: serverTimestamp(),
           });
         }
+        checkAndSendLowStockAlert(newItemRef.id);
         nextSno += 1;
       }
       setSuccess(
@@ -536,6 +538,7 @@ function MovementImport({ existingItems, userEmail }) {
               createdAt: serverTimestamp(),
             });
           });
+          await checkAndSendLowStockAlert(r.itemId);
           recorded += 1;
         } catch (err) {
           failed.push(err.message);
