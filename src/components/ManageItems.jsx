@@ -12,6 +12,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { Boxes, Plus, Pencil, ArrowLeftRight, X } from 'lucide-react';
+import { checkAndSendLowStockAlert } from '../lowStockAlert';
 
 const MOVEMENT_TYPES = [
   { id: 'purchase', label: 'Purchase (In)', direction: 'in' },
@@ -125,6 +126,7 @@ export default function ManageItems({ userRole }) {
             createdAt: serverTimestamp(),
           });
         }
+        checkAndSendLowStockAlert(newItemRef.id);
       }
       setShowForm(false);
       resetForm();
@@ -361,6 +363,7 @@ function MovementModal({ item, onClose }) {
           createdAt: serverTimestamp(),
         });
       });
+      await checkAndSendLowStockAlert(item.id);
       onClose();
     } catch (err) {
       setError(err.message);
