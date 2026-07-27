@@ -7,6 +7,9 @@ const DEFAULT_ALERT_EMAIL = 'subabake@gmail.com';
 
 export default function Settings({ userRole }) {
   const [email, setEmail] = useState('');
+  const [storesManagerEmail, setStoresManagerEmail] = useState('');
+  const [generalManagerEmail, setGeneralManagerEmail] = useState('');
+  const [managingDirectorEmail, setManagingDirectorEmail] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState('');
@@ -16,10 +19,17 @@ export default function Settings({ userRole }) {
     (async () => {
       try {
         const snap = await getDoc(doc(db, 'settings', 'general'));
-        if (snap.exists() && snap.data().lowStockAlertEmail) {
-          setEmail(snap.data().lowStockAlertEmail);
+        if (snap.exists()) {
+          const data = snap.data();
+          setEmail(data.lowStockAlertEmail || DEFAULT_ALERT_EMAIL);
+          setStoresManagerEmail(data.storesManagerEmail || DEFAULT_ALERT_EMAIL);
+          setGeneralManagerEmail(data.generalManagerEmail || DEFAULT_ALERT_EMAIL);
+          setManagingDirectorEmail(data.managingDirectorEmail || DEFAULT_ALERT_EMAIL);
         } else {
           setEmail(DEFAULT_ALERT_EMAIL);
+          setStoresManagerEmail(DEFAULT_ALERT_EMAIL);
+          setGeneralManagerEmail(DEFAULT_ALERT_EMAIL);
+          setManagingDirectorEmail(DEFAULT_ALERT_EMAIL);
         }
       } catch (e) {
         setEmail(DEFAULT_ALERT_EMAIL);
@@ -50,7 +60,13 @@ export default function Settings({ userRole }) {
     try {
       await setDoc(
         doc(db, 'settings', 'general'),
-        { lowStockAlertEmail: email.trim(), updatedAt: serverTimestamp() },
+        {
+          lowStockAlertEmail: email.trim(),
+          storesManagerEmail: storesManagerEmail.trim(),
+          generalManagerEmail: generalManagerEmail.trim(),
+          managingDirectorEmail: managingDirectorEmail.trim(),
+          updatedAt: serverTimestamp(),
+        },
         { merge: true }
       );
       setSuccess('Saved.');
@@ -70,10 +86,11 @@ export default function Settings({ userRole }) {
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
         <div>
-          <h2 className="font-semibold text-gray-800 mb-1">Low Stock Alert Email</h2>
+          <h2 className="font-semibold text-gray-800 mb-1">Alert Email (Administrator)</h2>
           <p className="text-sm text-gray-500 mb-3">
-            When any item's stock drops to or below its reorder level, an email alert is sent to this
-            address automatically.
+            Used for two things: (1) low-stock alerts, sent the moment any item's stock drops to or below its
+            reorder level; (2) the daily 9:00 AM warehouse put-away reminder, sent only when there are pending
+            locations.
           </p>
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded mb-3 text-sm">{error}</div>
@@ -84,14 +101,51 @@ export default function Settings({ userRole }) {
             </div>
           )}
           {!loading && (
-            <form onSubmit={handleSave} className="flex flex-wrap gap-3">
+            <form onSubmit={handleSave} className="space-y-4">
               <input
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="flex-1 min-w-[240px] px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
                 required
               />
+
+              <div className="pt-2 border-t">
+                <h3 className="font-semibold text-gray-800 mb-1 mt-3">Warehouse Put-away Escalation</h3>
+                <p className="text-sm text-gray-500 mb-3">
+                  If any item stays LOCATION PENDING past these thresholds, the daily reminder email is also CC'd to:
+                </p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Stores Manager (CC after 3 days pending)</label>
+                    <input
+                      type="email"
+                      value={storesManagerEmail}
+                      onChange={(e) => setStoresManagerEmail(e.target.value)}
+                      className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">General Manager (CC after 7 days pending)</label>
+                    <input
+                      type="email"
+                      value={generalManagerEmail}
+                      onChange={(e) => setGeneralManagerEmail(e.target.value)}
+                      className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Managing Director (CC after 15 days pending)</label>
+                    <input
+                      type="email"
+                      value={managingDirectorEmail}
+                      onChange={(e) => setManagingDirectorEmail(e.target.value)}
+                      className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                    />
+                  </div>
+                </div>
+              </div>
+
               <button
                 type="submit"
                 disabled={saving}

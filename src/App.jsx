@@ -17,6 +17,9 @@ import SpareSearch from './components/SpareSearch';
 import AuditDashboard from './components/AuditDashboard';
 import SearchLogs from './components/SearchLogs';
 import Settings from './components/Settings';
+import Warehouse from './components/Warehouse';
+import LocationMaster from './components/LocationMaster';
+import PutawayAlertPopup from './components/PutawayAlertPopup';
 import './index.css';
 
 export default function App() {
@@ -89,6 +92,10 @@ export default function App() {
         return <SearchLogs userRole={userRole} />;
       case 'settings':
         return <Settings userRole={userRole} />;
+      case 'warehouse':
+        return <Warehouse userRole={userRole} userEmail={user.email} />;
+      case 'locations':
+        return <LocationMaster userRole={userRole} />;
       case 'danger':
         return <DangerZone userRole={userRole} />;
       case 'changepassword':
@@ -109,6 +116,7 @@ export default function App() {
       <main className="flex-1 overflow-auto">
         <div className="p-6">{renderView()}</div>
       </main>
+      <PutawayAlertPopup userRole={userRole} onViewReport={() => setCurrentView('warehouse')} />
     </div>
   );
 }

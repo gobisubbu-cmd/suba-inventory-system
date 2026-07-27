@@ -3,6 +3,7 @@ import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 import { BarChart3, Download } from 'lucide-react';
+import { daysPending, ageingColour, LOCATION_STATUS } from '../putaway';
 
 function toDate(ts) {
   if (!ts) return null;
@@ -20,6 +21,7 @@ function download(filename, rows) {
 export default function Reports({ userRole }) {
   const [items, setItems] = useState([]);
   const [transactions, setTransactions] = useState([]);
+  const [putawayLines, setPutawayLines] = useState([]);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
@@ -30,9 +32,13 @@ export default function Reports({ userRole }) {
     const unsubTxns = onSnapshot(query(collection(db, 'transactions'), orderBy('createdAt', 'desc')), (snap) => {
       setTransactions(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
+    const unsubPutaway = onSnapshot(query(collection(db, 'putawayLines'), orderBy('createdAt', 'desc')), (snap) => {
+      setPutawayLines(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
     return () => {
       unsubItems();
       unsubTxns();
+      unsubPutaway();
     };
   }, []);
 
@@ -99,6 +105,90 @@ export default function Reports({ userRole }) {
     download(name, rows);
   };
 
+  // --- Warehouse Put-away reports ---
+
+  const exportPutawayReport = () => {
+    download(
+      'putaway_report.xlsx',
+      putawayLines.map((l) => ({
+        'Invoice Number': l.invoiceNumber,
+        'Invoice Date': l.invoiceDate,
+        Supplier: l.supplier,
+        'Item Code': l.itemCode,
+        Description: l.description,
+        'Received Quantity': l.receivedQty,
+        'Located Quantity': l.locatedQty,
+        'Pending Quantity': l.pendingQty,
+        Status: l.status,
+      }))
+    );
+  };
+
+  const exportPendingLocationReport = () => {
+    const pending = putawayLines.filter((l) => l.status !== LOCATION_STATUS.COMPLETE);
+    download(
+      'pending_location_report.xlsx',
+      pending.map((l) => ({
+        'Invoice Number': l.invoiceNumber,
+        'Invoice Date': l.invoiceDate,
+        Supplier: l.supplier,
+        'Item Code': l.itemCode,
+        Description: l.description,
+        'Received Qty': l.receivedQty,
+        'Located Qty': l.locatedQty,
+        'Pending Qty': l.pendingQty,
+        'Days Pending': daysPending(l.createdAt),
+        Status: l.status,
+      }))
+    );
+  };
+
+  const exportCompletedLocationReport = () => {
+    const completed = putawayLines.filter((l) => l.status === LOCATION_STATUS.COMPLETE);
+    download(
+      'completed_location_report.xlsx',
+      completed.map((l) => ({
+        'Invoice Number': l.invoiceNumber,
+        Item: l.description,
+        'Received Qty': l.receivedQty,
+        Locations: (l.allocations || []).map((a) => `${a.locationCode} (${a.qty})`).join(', '),
+      }))
+    );
+  };
+
+  const exportAgeingReport = () => {
+    const pending = putawayLines.filter((l) => l.status !== LOCATION_STATUS.COMPLETE);
+    download(
+      'ageing_report.xlsx',
+      pending
+        .map((l) => ({ ...l, _days: daysPending(l.createdAt) }))
+        .sort((a, b) => b._days - a._days)
+        .map((l) => ({
+          'Invoice Number': l.invoiceNumber,
+          Item: l.description,
+          'Pending Qty': l.pendingQty,
+          'Days Pending': l._days,
+          Band: l._days <= 2 ? 'Yellow (1-2 days)' : l._days <= 7 ? 'Orange (3-7 days)' : 'Red (8+ days)',
+        }))
+    );
+  };
+
+  const exportLocationWiseStock = (groupField) => {
+    const rollup = {};
+    putawayLines.forEach((l) => {
+      (l.allocations || []).forEach((a) => {
+        const parts = String(a.locationCode || '').split('-');
+        const key = groupField === 'rack' ? parts[0] : groupField === 'shelf' ? parts[1] : groupField === 'bin' ? parts[2] : a.locationCode;
+        if (!key) return;
+        rollup[key] = (rollup[key] || 0) + Number(a.qty || 0);
+      });
+    });
+    download(
+      `${groupField}_wise_stock.xlsx`,
+      Object.entries(rollup).map(([key, qty]) => ({ [groupField === 'location' ? 'Location Code' : groupField.charAt(0).toUpperCase() + groupField.slice(1)]: key, Quantity: qty }))
+    );
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -115,6 +205,24 @@ export default function Reports({ userRole }) {
           <ReportButton label="Issues Only" onClick={() => exportMovements('issue')} />
           <ReportButton label="All Transactions (raw)" onClick={() => exportMovements(null)} />
         </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow p-6 space-y-4">
+        <h2 className="font-semibold text-gray-800">Warehouse Put-away Reports</h2>
+        <div className="flex flex-wrap gap-3">
+          <ReportButton label="Put-away Report" onClick={exportPutawayReport} />
+          <ReportButton label="Pending Location Report" onClick={exportPendingLocationReport} />
+          <ReportButton label="Completed Location Report" onClick={exportCompletedLocationReport} />
+          <ReportButton label="Ageing Report" onClick={exportAgeingReport} />
+          <ReportButton label="Location-wise Stock" onClick={() => exportLocationWiseStock('location')} />
+          <ReportButton label="Rack-wise Stock" onClick={() => exportLocationWiseStock('rack')} />
+          <ReportButton label="Shelf-wise Stock" onClick={() => exportLocationWiseStock('shelf')} />
+          <ReportButton label="Bin-wise Stock" onClick={() => exportLocationWiseStock('bin')} />
+        </div>
+        <p className="text-xs text-gray-400">
+          For full Location History (every location change with user/date/time), see Warehouse Put-away &rarr;
+          Location History in the left menu.
+        </p>
       </div>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">

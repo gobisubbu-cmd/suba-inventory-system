@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
+import { createPutawayLine, getExistingLocationsForItem } from '../putaway';
 
 const FIELD_ALIASES = {
   particulars: ['particulars', 'item', 'item name', 'name', 'description', 'material'],
@@ -431,14 +432,20 @@ function MovementImport({ existingItems, userEmail }) {
   const [movementType, setMovementType] = useState('purchase');
   const [rows, setRows] = useState([]);
   const [reason, setReason] = useState('');
+  const [supplier, setSupplier] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [sourceLabel, setSourceLabel] = useState('');
+  const [existingLocationsByItem, setExistingLocationsByItem] = useState({});
   const fileInputRef = useRef(null);
 
   const movement = MOVEMENT_TYPES.find((m) => m.id === movementType);
   const showUnitCost = movementType === 'purchase';
+  // Purchases and Returns both bring stock IN — both trigger the warehouse
+  // put-away workflow (Step 1 of the spec: location stays blank/pending
+  // immediately after the receipt is saved).
+  const isReceiving = movement.direction === 'in';
 
   const itemOptions = useMemo(
     () => [...existingItems].sort((a, b) => (a.particulars || '').localeCompare(b.particulars || '')),
@@ -469,6 +476,17 @@ function MovementImport({ existingItems, userEmail }) {
         };
       });
       setRows(withMatches);
+      // EXISTING STOCK check (per spec): before saving, look up whether this
+      // item already has storage locations recorded, and show them purely as
+      // reference — never auto-assigned.
+      if (isReceiving) {
+        const entries = await Promise.all(
+          withMatches
+            .filter((r) => r.itemId)
+            .map(async (r) => [r.itemId, await getExistingLocationsForItem(r.itemId)])
+        );
+        setExistingLocationsByItem(Object.fromEntries(entries));
+      }
     } catch (err) {
       setError(err.message || 'Failed to read that file.');
     } finally {
@@ -479,6 +497,11 @@ function MovementImport({ existingItems, userEmail }) {
 
   const updateRow = (idx, field, value) => {
     setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
+    if (field === 'itemId' && value && isReceiving) {
+      getExistingLocationsForItem(value).then((locs) => {
+        setExistingLocationsByItem((prev) => ({ ...prev, [value]: locs }));
+      });
+    }
   };
 
   const removeRow = (idx) => {
@@ -507,6 +530,9 @@ function MovementImport({ existingItems, userEmail }) {
     try {
       for (const r of matched) {
         const qty = Number(r.quantity);
+        let committedItemName = '';
+        let committedItemCode = '';
+        let committedTxnId = '';
         try {
           await runTransaction(db, async (tx) => {
             const itemRef = doc(db, 'items', r.itemId);
@@ -537,8 +563,28 @@ function MovementImport({ existingItems, userEmail }) {
               performedByEmail: userEmail || '',
               createdAt: serverTimestamp(),
             });
+            committedItemName = itemSnap.data().particulars;
+            committedItemCode = itemSnap.data().sno;
+            committedTxnId = txnRef.id;
           });
           await checkAndSendLowStockAlert(r.itemId);
+          // WAREHOUSE PUT-AWAY: every "in" movement (Purchase or Return) lands
+          // in stock immediately (already done above) but starts out with NO
+          // warehouse location — it's tracked as LOCATION PENDING until the
+          // admin uploads the completed Put-away Location Report.
+          if (isReceiving) {
+            await createPutawayLine({
+              itemId: r.itemId,
+              itemName: committedItemName,
+              itemCode: committedItemCode,
+              quantity: qty,
+              invoiceNumber: reason.trim() || sourceLabel || 'N/A',
+              invoiceDate: new Date().toISOString().slice(0, 10),
+              supplier: supplier.trim(),
+              transactionId: committedTxnId,
+              userEmail,
+            });
+          }
           recorded += 1;
         } catch (err) {
           failed.push(err.message);
@@ -609,16 +655,39 @@ function MovementImport({ existingItems, userEmail }) {
         </div>
 
         {rows.length > 0 && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Reason / Reference (applies to all rows)</label>
-            <input
-              type="text"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              className="w-full max-w-md px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
-              placeholder="Invoice no., customer, notes..."
-            />
+          <div className="flex flex-wrap gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                {isReceiving ? 'Invoice / Reference Number' : 'Reason / Reference'} (applies to all rows)
+              </label>
+              <input
+                type="text"
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="w-full max-w-md px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                placeholder="Invoice no., customer, notes..."
+              />
+            </div>
+            {isReceiving && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
+                <input
+                  type="text"
+                  value={supplier}
+                  onChange={(e) => setSupplier(e.target.value)}
+                  className="w-full max-w-md px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                  placeholder="Supplier name"
+                />
+              </div>
+            )}
           </div>
+        )}
+        {isReceiving && rows.length > 0 && (
+          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+            Recording this will update stock immediately. Warehouse locations stay <strong>LOCATION PENDING</strong> until
+            someone physically puts the goods away and the completed Put-away Report is uploaded — see the
+            "Put-away" section in the left menu.
+          </p>
         )}
 
         {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
@@ -648,11 +717,14 @@ function MovementImport({ existingItems, userEmail }) {
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Matched Item</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Quantity</th>
                 {showUnitCost && <th className="text-left px-3 py-2 font-semibold text-gray-600">Unit Cost</th>}
+                {isReceiving && <th className="text-left px-3 py-2 font-semibold text-gray-600">Existing Stock Locations</th>}
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, idx) => (
+              {rows.map((r, idx) => {
+                const existingLocs = existingLocationsByItem[r.itemId] || [];
+                return (
                 <tr key={idx} className="border-b last:border-0">
                   <td className="px-2 py-1 text-gray-600">{r.particulars}</td>
                   <td className="px-2 py-1">
@@ -686,13 +758,29 @@ function MovementImport({ existingItems, userEmail }) {
                       />
                     </td>
                   )}
+                  {isReceiving && (
+                    <td className="px-2 py-1 text-xs text-gray-500">
+                      {!r.itemId ? (
+                        '—'
+                      ) : existingLocs.length === 0 ? (
+                        <span className="italic">No existing location on record</span>
+                      ) : (
+                        existingLocs.map((l) => (
+                          <span key={l.locationCode} className="inline-block bg-gray-100 rounded px-2 py-0.5 mr-1 mb-1">
+                            {l.locationCode} · Qty {l.qty}
+                          </span>
+                        ))
+                      )}
+                    </td>
+                  )}
                   <td className="px-2 py-1">
                     <button onClick={() => removeRow(idx)} className="text-red-500 hover:text-red-700" title="Remove row">
                       <Trash2 size={16} />
                     </button>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

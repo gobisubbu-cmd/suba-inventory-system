@@ -1,17 +1,29 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query, addDoc, serverTimestamp } from 'firebase/firestore';
-import { Search, Package, AlertTriangle } from 'lucide-react';
+import { Search, Package, AlertTriangle, PackageX } from 'lucide-react';
+import { LOCATION_STATUS, computePutawayStats } from '../putaway';
 
 export default function Dashboard({ userRole, userEmail }) {
   const [items, setItems] = useState([]);
   const [search, setSearch] = useState('');
+  const [putawayStats, setPutawayStats] = useState(null);
   const canSeeValue = userRole === 'admin' || userRole === 'inventory_manager';
 
   useEffect(() => {
     const q = query(collection(db, 'items'), orderBy('sno', 'asc'));
     const unsub = onSnapshot(q, (snap) => {
       setItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'putawayLines'), (snap) => {
+      const pending = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .filter((l) => l.status !== LOCATION_STATUS.COMPLETE);
+      setPutawayStats(computePutawayStats(pending));
     });
     return unsub;
   }, []);
@@ -71,6 +83,33 @@ export default function Dashboard({ userRole, userEmail }) {
           <h1 className="text-3xl font-bold text-gray-800">Dashboard</h1>
         </div>
       </div>
+
+      {putawayStats && putawayStats.pendingItems > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <PackageX className="text-amber-600 shrink-0" size={20} />
+            <h2 className="font-bold text-amber-800">Warehouse locations pending</h2>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div className="bg-white rounded-lg p-3 border border-amber-100">
+              <p className="text-gray-500 text-xs">Pending Purchase Invoices</p>
+              <p className="text-lg font-bold text-gray-800">{putawayStats.pendingInvoices}</p>
+            </div>
+            <div className="bg-white rounded-lg p-3 border border-amber-100">
+              <p className="text-gray-500 text-xs">Pending Items</p>
+              <p className="text-lg font-bold text-gray-800">{putawayStats.pendingItems}</p>
+            </div>
+            <div className="bg-white rounded-lg p-3 border border-amber-100">
+              <p className="text-gray-500 text-xs">Pending Quantity</p>
+              <p className="text-lg font-bold text-gray-800">{putawayStats.pendingQty}</p>
+            </div>
+            <div className="bg-white rounded-lg p-3 border border-amber-100">
+              <p className="text-gray-500 text-xs">Oldest / Newest Pending</p>
+              <p className="text-lg font-bold text-gray-800">{putawayStats.oldestDays}d / {putawayStats.newestDays}d</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {lowStockItems.length > 0 && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4">
