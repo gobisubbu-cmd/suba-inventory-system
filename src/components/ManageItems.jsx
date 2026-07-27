@@ -31,6 +31,7 @@ export default function ManageItems({ userRole }) {
 
   const [form, setForm] = useState({
     particulars: '',
+    partCode: '',
     unit: '',
     rackNo: '',
     reorderLevel: '',
@@ -48,7 +49,7 @@ export default function ManageItems({ userRole }) {
   }, []);
 
   const resetForm = () => {
-    setForm({ particulars: '', unit: '', rackNo: '', reorderLevel: '', hsnCode: '', avgCost: '', openingStock: '' });
+    setForm({ particulars: '', partCode: '', unit: '', rackNo: '', reorderLevel: '', hsnCode: '', avgCost: '', openingStock: '' });
     setEditingItem(null);
     setError('');
   };
@@ -62,6 +63,7 @@ export default function ManageItems({ userRole }) {
     setEditingItem(item);
     setForm({
       particulars: item.particulars || '',
+      partCode: item.partCode || '',
       unit: item.unit || '',
       rackNo: item.rackNo || '',
       reorderLevel: item.reorderLevel ?? '',
@@ -93,6 +95,7 @@ export default function ManageItems({ userRole }) {
       if (editingItem) {
         await updateDoc(doc(db, 'items', editingItem.id), {
           particulars: name,
+          partCode: form.partCode.trim(),
           unit: form.unit.trim(),
           rackNo: form.rackNo.trim(),
           reorderLevel: Number(form.reorderLevel) || 0,
@@ -106,6 +109,7 @@ export default function ManageItems({ userRole }) {
         const newItemRef = await addDoc(collection(db, 'items'), {
           sno: nextSno,
           particulars: name,
+          partCode: form.partCode.trim(),
           unit: form.unit.trim(),
           rackNo: form.rackNo.trim(),
           reorderLevel: Number(form.reorderLevel) || 0,
@@ -160,6 +164,7 @@ export default function ManageItems({ userRole }) {
           <thead className="bg-gray-50 border-b">
             <tr>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">S.No</th>
+              <th className="text-left px-4 py-3 font-semibold text-gray-600">Part Code</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Particulars</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Unit</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Rack No</th>
@@ -174,6 +179,7 @@ export default function ManageItems({ userRole }) {
             {items.map((it) => (
               <tr key={it.id} className="border-b last:border-0 hover:bg-gray-50">
                 <td className="px-4 py-3">{it.sno}</td>
+                <td className="px-4 py-3 font-semibold text-emerald-700">{it.partCode || '-'}</td>
                 <td className="px-4 py-3 font-medium text-gray-800">{it.particulars}</td>
                 <td className="px-4 py-3">{it.unit}</td>
                 <td className="px-4 py-3">{it.rackNo}</td>
@@ -201,7 +207,7 @@ export default function ManageItems({ userRole }) {
             ))}
             {items.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={10} className="px-4 py-8 text-center text-gray-400">
                   No items yet. Click "Add New Item" to get started.
                 </td>
               </tr>
@@ -233,6 +239,16 @@ export default function ManageItems({ userRole }) {
                   onChange={(e) => setForm({ ...form, particulars: e.target.value })}
                   className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
                   required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Part Code</label>
+                <input
+                  type="text"
+                  value={form.partCode}
+                  onChange={(e) => setForm({ ...form, partCode: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                  placeholder="e.g., 70.01.530S"
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">

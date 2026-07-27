@@ -34,6 +34,7 @@ export default function Dashboard({ userRole, userEmail }) {
     return items.filter(
       (it) =>
         (it.particulars || '').toLowerCase().includes(s) ||
+        (it.partCode || '').toLowerCase().includes(s) ||
         (it.rackNo || '').toLowerCase().includes(s) ||
         (it.hsnCode || '').toLowerCase().includes(s) ||
         String(it.sno || '').includes(s)
@@ -151,7 +152,7 @@ export default function Dashboard({ userRole, userEmail }) {
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by particulars, rack no, HSN code, S.No..."
+          placeholder="Search by particulars, part code, rack no, HSN code, S.No..."
           className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-emerald-600"
         />
       </div>
@@ -161,6 +162,7 @@ export default function Dashboard({ userRole, userEmail }) {
           <thead className="bg-gray-50 border-b">
             <tr>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">S.No</th>
+              <th className="text-left px-4 py-3 font-semibold text-gray-600">Part Code</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Particulars</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Unit</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Rack No</th>
@@ -175,7 +177,7 @@ export default function Dashboard({ userRole, userEmail }) {
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={canSeeValue ? 8 : 7} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={canSeeValue ? 9 : 8} className="px-4 py-8 text-center text-gray-400">
                   No items found.
                 </td>
               </tr>
@@ -186,6 +188,7 @@ export default function Dashboard({ userRole, userEmail }) {
               return (
                 <tr key={it.id} className="border-b last:border-0 hover:bg-gray-50">
                   <td className="px-4 py-3">{it.sno}</td>
+                  <td className="px-4 py-3 font-semibold text-emerald-700">{it.partCode || '-'}</td>
                   <td className="px-4 py-3 font-medium text-gray-800">{it.particulars}</td>
                   <td className="px-4 py-3">{it.unit}</td>
                   <td className="px-4 py-3">{it.rackNo}</td>
