@@ -13,6 +13,7 @@ import {
 } from 'firebase/firestore';
 import { Boxes, Plus, Pencil, ArrowLeftRight, X } from 'lucide-react';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
+import { createPutawayLine } from '../putaway';
 
 const MOVEMENT_TYPES = [
   { id: 'purchase', label: 'Purchase (In)', direction: 'in' },
@@ -321,8 +322,10 @@ function MovementModal({ item, onClose }) {
   const [quantity, setQuantity] = useState('');
   const [unitCost, setUnitCost] = useState('');
   const [reason, setReason] = useState('');
+  const [supplier, setSupplier] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const isReceiving = type === 'purchase' || type === 'return';
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -335,6 +338,9 @@ function MovementModal({ item, onClose }) {
     const movement = MOVEMENT_TYPES.find((m) => m.id === type);
     setSaving(true);
     try {
+      let committedItemName = item.particulars;
+      let committedItemCode = item.sno;
+      let committedTxnId = '';
       await runTransaction(db, async (tx) => {
         const itemRef = doc(db, 'items', item.id);
         const itemSnap = await tx.get(itemRef);
@@ -362,8 +368,28 @@ function MovementModal({ item, onClose }) {
           performedByEmail: auth.currentUser?.email || '',
           createdAt: serverTimestamp(),
         });
+        committedItemName = itemSnap.data().particulars;
+        committedItemCode = itemSnap.data().sno;
+        committedTxnId = txnRef.id;
       });
       await checkAndSendLowStockAlert(item.id);
+      // WAREHOUSE PUT-AWAY: a Purchase or Return recorded here lands in stock
+      // immediately (already done above) but starts with NO warehouse location —
+      // it must show up as LOCATION PENDING just like receipts recorded via
+      // Import Data, so the two entry points stay consistent.
+      if (isReceiving) {
+        await createPutawayLine({
+          itemId: item.id,
+          itemName: committedItemName,
+          itemCode: committedItemCode,
+          quantity: qty,
+          invoiceNumber: reason.trim() || 'N/A',
+          invoiceDate: new Date().toISOString().slice(0, 10),
+          supplier: supplier.trim(),
+          transactionId: committedTxnId,
+          userEmail: auth.currentUser?.email || '',
+        });
+      }
       onClose();
     } catch (err) {
       setError(err.message);
@@ -382,6 +408,11 @@ function MovementModal({ item, onClose }) {
           </button>
         </div>
         <p className="text-sm text-gray-500 mb-4">Current stock: {item.currentStock} {item.unit}</p>
+        {isReceiving && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-3 py-2 rounded mb-4 text-xs">
+            This will be recorded as <strong>LOCATION PENDING</strong> in Warehouse Put-away until a location is assigned.
+          </div>
+        )}
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded mb-4 text-sm">{error}</div>
         )}
@@ -417,6 +448,18 @@ function MovementModal({ item, onClose }) {
                 value={unitCost}
                 onChange={(e) => setUnitCost(e.target.value)}
                 className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+              />
+            </div>
+          )}
+          {isReceiving && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
+              <input
+                type="text"
+                value={supplier}
+                onChange={(e) => setSupplier(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                placeholder="Supplier name"
               />
             </div>
           )}
