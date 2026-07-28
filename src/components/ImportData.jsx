@@ -26,6 +26,7 @@ import { createPutawayLine, getExistingLocationsForItem } from '../putaway';
 
 const FIELD_ALIASES = {
   particulars: ['particulars', 'item', 'item name', 'name', 'description', 'material'],
+  partCode: ['part code', 'partcode', 'part no', 'part number', 'code', 'item code'],
   unit: ['unit', 'uom', 'units'],
   quantity: ['quantity', 'qty', 'opening stock', 'stock', 'current stock', 'stock qty'],
   rackNo: ['rack no', 'rack', 'location', 'bin', 'rack number'],
@@ -46,7 +47,7 @@ function normalizeHeader(h) {
 }
 
 function mapRow(rawRow) {
-  const out = { particulars: '', unit: '', quantity: '', rackNo: '', hsnCode: '', avgCost: '', reorderLevel: '' };
+  const out = { particulars: '', partCode: '', unit: '', quantity: '', rackNo: '', hsnCode: '', avgCost: '', reorderLevel: '' };
   const keys = Object.keys(rawRow);
   Object.entries(FIELD_ALIASES).forEach(([field, aliases]) => {
     const matchKey = keys.find((k) => aliases.includes(normalizeHeader(k)));
@@ -60,6 +61,7 @@ function mapRow(rawRow) {
 function normalizeAiItem(item) {
   return {
     particulars: item.particulars || '',
+    partCode: item.partCode || '',
     unit: item.unit || '',
     quantity: item.quantity ?? '',
     rackNo: item.rackNo || '',
@@ -257,6 +259,7 @@ function NewItemsImport({ existingItems }) {
         const newItemRef = await addDoc(collection(db, 'items'), {
           sno: nextSno,
           particulars: r.particulars,
+          partCode: String(r.partCode || '').trim(),
           unit: String(r.unit || '').trim(),
           rackNo: String(r.rackNo || '').trim(),
           reorderLevel: Number(r.reorderLevel) || 0,
@@ -349,6 +352,7 @@ function NewItemsImport({ existingItems }) {
             <thead className="bg-gray-50 border-b">
               <tr>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Particulars</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Part Code</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Unit</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Opening Qty</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Rack No</th>
@@ -366,6 +370,14 @@ function NewItemsImport({ existingItems }) {
                       value={r.particulars}
                       onChange={(e) => updateRow(idx, 'particulars', e.target.value)}
                       className="w-full px-2 py-1 border rounded"
+                    />
+                  </td>
+                  <td className="px-2 py-1">
+                    <input
+                      value={r.partCode}
+                      onChange={(e) => updateRow(idx, 'partCode', e.target.value)}
+                      placeholder="70.01.530S"
+                      className="w-28 px-2 py-1 border rounded"
                     />
                   </td>
                   <td className="px-2 py-1">
