@@ -9,6 +9,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { Search, UserCheck, PlusCircle, PackageSearch, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { computeStockStatus, STOCK_STATUS_STYLES, allPartNumbers } from '../lib/brands';
 
 // A random ID for this browser session, so audit records can be grouped
 const SESSION_ID = Math.random().toString(36).slice(2, 10).toUpperCase();
@@ -96,12 +97,21 @@ export default function SpareSearch({ userRole, userEmail }) {
     const started = Date.now();
 
     const lower = term.toLowerCase();
-    const matches = items.filter(
-      (item) =>
-        (item.particulars || '').toLowerCase().includes(lower) ||
-        (item.hsnCode || '').toString().toLowerCase().includes(lower) ||
-        (item.rackNo || '').toString().toLowerCase().includes(lower)
-    );
+    const matches = items.filter((item) => {
+      const haystacks = [
+        item.particulars,
+        item.description,
+        item.hsnCode,
+        item.rackNo,
+        item.brand,
+        item.category,
+        item.supplier,
+        item.machineModels,
+        computeStockStatus(item),
+        ...allPartNumbers(item),
+      ];
+      return haystacks.some((h) => String(h || '').toLowerCase().includes(lower));
+    });
     setResults(matches);
 
     // Write immutable audit record — every search is logged, no exceptions
@@ -121,6 +131,8 @@ export default function SpareSearch({ userRole, userEmail }) {
         found: matches.length > 0,
         topResults: matches.slice(0, 5).map((m) => ({
           particulars: m.particulars || '',
+          brand: m.brand || '',
+          partNumber: m.partNumber || m.partCode || '',
           currentStock: m.currentStock ?? '',
           unit: m.unit || '',
           rackNo: m.rackNo || '',
@@ -217,7 +229,7 @@ export default function SpareSearch({ userRole, userEmail }) {
         <form onSubmit={handleSearch} className="flex flex-wrap gap-3">
           <input
             type="text"
-            placeholder={selectedCustomer ? 'Type spare part name, HSN code or rack no...' : 'Select a customer first'}
+            placeholder={selectedCustomer ? 'Type part number (old or new), name, brand, model, category, supplier...' : 'Select a customer first'}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             disabled={!selectedCustomer}
@@ -260,9 +272,10 @@ export default function SpareSearch({ userRole, userEmail }) {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 text-gray-600">
                   <tr>
+                    <th className="text-left px-5 py-3">Brand</th>
+                    <th className="text-left px-5 py-3">Part Number</th>
                     <th className="text-left px-5 py-3">Particulars</th>
                     <th className="text-left px-5 py-3">Rack No</th>
-                    <th className="text-left px-5 py-3">HSN Code</th>
                     <th className="text-right px-5 py-3">Current Stock</th>
                     <th className="text-left px-5 py-3">Unit</th>
                     <th className="text-left px-5 py-3">Status</th>
@@ -271,22 +284,24 @@ export default function SpareSearch({ userRole, userEmail }) {
                 <tbody>
                   {results.map((item) => {
                     const stock = Number(item.currentStock) || 0;
-                    const reorder = Number(item.reorderLevel) || 0;
+                    const status = computeStockStatus(item);
                     return (
                       <tr key={item.id} className="border-t hover:bg-gray-50">
+                        <td className="px-5 py-3">
+                          <span className="inline-block bg-emerald-50 text-emerald-800 text-xs font-semibold px-2 py-1 rounded">{item.brand || 'Unassigned'}</span>
+                        </td>
+                        <td className="px-5 py-3 font-mono text-xs">
+                          {item.partNumber || item.partCode || '-'}
+                          {item.oldPartNumbers?.length > 0 && (
+                            <div className="text-gray-400">was: {item.oldPartNumbers.join(', ')}</div>
+                          )}
+                        </td>
                         <td className="px-5 py-3 font-medium text-gray-800">{item.particulars}</td>
                         <td className="px-5 py-3">{item.rackNo || '-'}</td>
-                        <td className="px-5 py-3">{item.hsnCode || '-'}</td>
                         <td className="px-5 py-3 text-right font-semibold">{stock}</td>
                         <td className="px-5 py-3">{item.unit || '-'}</td>
                         <td className="px-5 py-3">
-                          {stock <= 0 ? (
-                            <span className="text-red-700 bg-red-50 px-2 py-1 rounded text-xs font-medium">Out of stock</span>
-                          ) : stock <= reorder ? (
-                            <span className="text-amber-700 bg-amber-50 px-2 py-1 rounded text-xs font-medium">Low stock</span>
-                          ) : (
-                            <span className="text-emerald-700 bg-emerald-50 px-2 py-1 rounded text-xs font-medium">Available</span>
-                          )}
+                          <span className={`inline-block text-xs font-semibold px-2 py-1 rounded border ${STOCK_STATUS_STYLES[status]}`}>{status}</span>
                         </td>
                       </tr>
                     );

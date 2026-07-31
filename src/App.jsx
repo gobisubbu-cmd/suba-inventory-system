@@ -20,6 +20,8 @@ import Settings from './components/Settings';
 import Warehouse from './components/Warehouse';
 import LocationMaster from './components/LocationMaster';
 import PutawayAlertPopup from './components/PutawayAlertPopup';
+import Brands from './components/Brands';
+import EngineerIssueReturn from './components/EngineerIssueReturn';
 import './index.css';
 
 export default function App() {
@@ -72,8 +74,12 @@ export default function App() {
     switch (currentView) {
       case 'dashboard':
         return <Dashboard userRole={userRole} userEmail={user.email} />;
+      case 'brands':
+        return <Brands userRole={userRole} />;
       case 'items':
         return <ManageItems userRole={userRole} />;
+      case 'engineers':
+        return <EngineerIssueReturn userRole={userRole} userEmail={user.email} />;
       case 'import':
         return <ImportData userRole={userRole} userEmail={user.email} />;
       case 'adjustment':

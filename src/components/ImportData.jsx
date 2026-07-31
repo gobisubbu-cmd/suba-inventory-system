@@ -1,12 +1,19 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { db, auth } from '../firebase';
+import { db } from '../firebase';
 import {
   collection,
   onSnapshot,
   addDoc,
   doc,
+  updateDoc,
+  writeBatch,
   runTransaction,
   serverTimestamp,
+  query,
+  where,
+  getDocs,
+  orderBy,
+  limit,
 } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 import {
@@ -19,20 +26,33 @@ import {
   CheckCircle2,
   PackagePlus,
   ArrowLeftRight,
+  AlertTriangle,
+  History,
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
 import { createPutawayLine, getExistingLocationsForItem } from '../putaway';
+import { fetchBrands, ensureSeedBrands } from '../lib/brands';
 
 const FIELD_ALIASES = {
-  particulars: ['particulars', 'item', 'item name', 'name', 'description', 'material'],
-  partCode: ['part code', 'partcode', 'part no', 'part number', 'code', 'item code'],
-  unit: ['unit', 'uom', 'units'],
+  particulars: ['particulars', 'item', 'item name', 'name', 'part name', 'material'],
+  description: ['description', 'part description'],
+  partCode: ['part number', 'part no', 'partno', 'part code', 'code', 'item code', 'new part number'],
+  oldPartCode: ['old part number', 'old part no', 'superseded by', 'replaced by'],
+  unit: ['unit', 'uom', 'units', 'unit of measure'],
   quantity: ['quantity', 'qty', 'opening stock', 'stock', 'current stock', 'stock qty'],
-  rackNo: ['rack no', 'rack', 'location', 'bin', 'rack number'],
+  rackNo: ['rack no', 'rack', 'location', 'bin', 'rack number', 'storage location', 'storage area'],
   hsnCode: ['hsn code', 'hsn', 'hsn/sac'],
-  avgCost: ['avg cost', 'average cost', 'rate', 'price', 'unit cost', 'unit price', 'cost'],
+  avgCost: ['avg cost', 'average cost', 'rate', 'unit cost', 'cost'],
+  purchaseCost: ['standard purchase cost', 'purchase cost', 'purchase price'],
+  sellingPrice: ['standard selling price', 'selling price', 'selling cost', 'price', 'non-binding recommended retail gross price', 'standard selling price (inr, indicative)'],
   reorderLevel: ['reorder level', 'reorder', 'min level', 'minimum stock', 'min stock'],
+  minStock: ['minimum stock', 'min stock'],
+  maxStock: ['maximum stock', 'max stock'],
+  category: ['category'],
+  machineModels: ['machine model(s)', 'machine model', 'model', 'models'],
+  supplier: ['supplier'],
+  notes: ['notes', 'remarks', 'notes / source'],
 };
 
 const MOVEMENT_TYPES = [
@@ -47,7 +67,8 @@ function normalizeHeader(h) {
 }
 
 function mapRow(rawRow) {
-  const out = { particulars: '', partCode: '', unit: '', quantity: '', rackNo: '', hsnCode: '', avgCost: '', reorderLevel: '' };
+  const out = {};
+  Object.keys(FIELD_ALIASES).forEach((f) => (out[f] = ''));
   const keys = Object.keys(rawRow);
   Object.entries(FIELD_ALIASES).forEach(([field, aliases]) => {
     const matchKey = keys.find((k) => aliases.includes(normalizeHeader(k)));
@@ -61,13 +82,23 @@ function mapRow(rawRow) {
 function normalizeAiItem(item) {
   return {
     particulars: item.particulars || '',
+    description: item.description || '',
     partCode: item.partCode || '',
+    oldPartCode: item.oldPartCode || '',
     unit: item.unit || '',
     quantity: item.quantity ?? '',
     rackNo: item.rackNo || '',
     hsnCode: item.hsnCode || '',
     avgCost: item.avgCost ?? '',
+    purchaseCost: item.purchaseCost ?? '',
+    sellingPrice: item.sellingPrice ?? '',
     reorderLevel: item.reorderLevel ?? '',
+    minStock: item.minStock ?? '',
+    maxStock: item.maxStock ?? '',
+    category: item.category || '',
+    machineModels: item.machineModels || '',
+    supplier: item.supplier || '',
+    notes: item.notes || '',
   };
 }
 
@@ -164,7 +195,7 @@ export default function ImportData({ userRole, userEmail }) {
             mode === 'newItems' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
           }`}
         >
-          <PackagePlus size={16} /> Add New Items
+          <PackagePlus size={16} /> Brand Catalogue / Stock Import
         </button>
         <button
           onClick={() => setMode('movement')}
@@ -177,7 +208,7 @@ export default function ImportData({ userRole, userEmail }) {
       </div>
 
       {mode === 'newItems' ? (
-        <NewItemsImport existingItems={existingItems} />
+        <NewItemsImport existingItems={existingItems} userEmail={userEmail} />
       ) : (
         <MovementImport existingItems={existingItems} userEmail={userEmail} />
       )}
@@ -185,13 +216,36 @@ export default function ImportData({ userRole, userEmail }) {
   );
 }
 
-function NewItemsImport({ existingItems }) {
+function NewItemsImport({ existingItems, userEmail }) {
+  const [brands, setBrands] = useState([]);
+  const [brand, setBrand] = useState('');
+  const [importMode, setImportMode] = useState('upsert'); // 'upsert' | 'replace'
+  const [confirmText, setConfirmText] = useState('');
   const [rows, setRows] = useState([]);
+  const [updateStockOnMatch, setUpdateStockOnMatch] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [sourceLabel, setSourceLabel] = useState('');
   const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    ensureSeedBrands(userEmail).then(() => fetchBrands().then(setBrands));
+  }, [userEmail]);
+
+  const brandItems = useMemo(() => existingItems.filter((it) => it.brand === brand), [existingItems, brand]);
+
+  const duplicatesInFile = useMemo(() => {
+    const seen = new Map();
+    const dups = new Set();
+    rows.forEach((r) => {
+      const key = String(r.partCode || r.particulars || '').trim().toLowerCase();
+      if (!key) return;
+      if (seen.has(key)) dups.add(key);
+      seen.set(key, true);
+    });
+    return dups;
+  }, [rows]);
 
   const handleFile = async (e) => {
     const file = e.target.files?.[0];
@@ -223,72 +277,131 @@ function NewItemsImport({ existingItems }) {
     setRows((prev) => prev.filter((_, i) => i !== idx));
   };
 
+  const logImportHistory = async (summary) => {
+    await addDoc(collection(db, 'importHistory'), {
+      brand,
+      mode: importMode,
+      fileName: sourceLabel,
+      importedByEmail: userEmail || '',
+      importedAt: serverTimestamp(),
+      ...summary,
+    });
+  };
+
   const handleImportAll = async () => {
     setError('');
     setSuccess('');
+    if (!brand) {
+      setError('Select a brand before importing — every spare part must belong to one brand.');
+      return;
+    }
+    if (importMode === 'replace' && confirmText.trim().toUpperCase() !== brand) {
+      setError(`Type "${brand}" in the confirmation box to replace this brand's entire inventory.`);
+      return;
+    }
     const clean = rows.map((r) => ({ ...r, particulars: String(r.particulars || '').trim() })).filter((r) => r.particulars);
     if (clean.length === 0) {
       setError('Nothing to import.');
       return;
     }
 
-    const existingNames = new Set(existingItems.map((it) => it.particulars?.trim().toLowerCase()));
-    const seenInBatch = new Set();
-    const skipped = [];
-    const toImport = [];
-    clean.forEach((r) => {
-      const key = r.particulars.toLowerCase();
-      if (existingNames.has(key) || seenInBatch.has(key)) {
-        skipped.push(r.particulars);
-      } else {
-        seenInBatch.add(key);
-        toImport.push(r);
-      }
-    });
-
-    if (toImport.length === 0) {
-      setError('All of these items already exist. Nothing new to import.');
-      return;
-    }
-
     setBusy(true);
     try {
-      let nextSno = existingItems.length ? Math.max(...existingItems.map((it) => Number(it.sno) || 0)) + 1 : 1;
-      for (const r of toImport) {
-        const opening = Number(r.quantity) || 0;
-        const newItemRef = await addDoc(collection(db, 'items'), {
-          sno: nextSno,
-          particulars: r.particulars,
-          partCode: String(r.partCode || '').trim(),
-          unit: String(r.unit || '').trim(),
-          rackNo: String(r.rackNo || '').trim(),
-          reorderLevel: Number(r.reorderLevel) || 0,
-          hsnCode: String(r.hsnCode || '').trim(),
-          avgCost: Number(r.avgCost) || 0,
-          currentStock: opening,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        if (opening > 0) {
-          await addDoc(collection(db, 'transactions'), {
-            itemId: newItemRef.id,
-            itemName: r.particulars,
-            type: 'opening',
-            direction: 'in',
-            quantity: opening,
-            reason: `Imported from ${sourceLabel}`,
-            performedByEmail: auth.currentUser?.email || '',
-            createdAt: serverTimestamp(),
-          });
+      if (importMode === 'replace') {
+        // Completely overwrite this brand's inventory: delete every existing
+        // doc for this brand, then insert the uploaded list fresh. Other
+        // brands are never touched by this query (scoped by brand ==).
+        const existingSnap = await getDocs(query(collection(db, 'items'), where('brand', '==', brand)));
+        const deleteBatchSize = 400;
+        const docsToDelete = existingSnap.docs;
+        for (let i = 0; i < docsToDelete.length; i += deleteBatchSize) {
+          const batch = writeBatch(db);
+          docsToDelete.slice(i, i + deleteBatchSize).forEach((d) => batch.delete(d.ref));
+          await batch.commit();
         }
-        checkAndSendLowStockAlert(newItemRef.id);
-        nextSno += 1;
+
+        let nextSno = existingItems.length ? Math.max(...existingItems.map((it) => Number(it.sno) || 0)) + 1 : 1;
+        const addBatchSize = 400;
+        for (let i = 0; i < clean.length; i += addBatchSize) {
+          const batch = writeBatch(db);
+          clean.slice(i, i + addBatchSize).forEach((r) => {
+            const qty = Number(r.quantity) || 0;
+            const newRef = doc(collection(db, 'items'));
+            batch.set(newRef, buildItemDoc(r, brand, nextSno, qty));
+            nextSno += 1;
+          });
+          await batch.commit();
+        }
+
+        await logImportHistory({
+          rowsAdded: clean.length,
+          rowsUpdated: 0,
+          rowsSkipped: 0,
+          deletedExisting: docsToDelete.length,
+        });
+        setSuccess(
+          `Replaced ${brand} inventory: removed ${docsToDelete.length} old record(s), added ${clean.length} verified record(s).`
+        );
+        setRows([]);
+        setConfirmText('');
+      } else {
+        // Upsert: match by Part Number first (new or old), then by exact
+        // name within the same brand. Never touches other brands. Existing
+        // stock quantities are preserved unless "update stock" is checked.
+        let nextSno = existingItems.length ? Math.max(...existingItems.map((it) => Number(it.sno) || 0)) + 1 : 1;
+        let added = 0;
+        let updated = 0;
+        let skipped = 0;
+        for (const r of clean) {
+          const code = String(r.partCode || '').trim().toLowerCase();
+          const oldCode = String(r.oldPartCode || '').trim().toLowerCase();
+          const match = brandItems.find((it) => {
+            const itNew = String(it.partNumber || it.partCode || '').trim().toLowerCase();
+            const itOld = (it.oldPartNumbers || []).map((o) => o.toLowerCase());
+            if (code && (itNew === code || itOld.includes(code))) return true;
+            if (oldCode && (itNew === oldCode || itOld.includes(oldCode))) return true;
+            if (!code && !oldCode) {
+              return it.particulars?.trim().toLowerCase() === r.particulars.trim().toLowerCase();
+            }
+            return false;
+          });
+
+          if (match) {
+            const updates = buildItemDoc(r, brand, match.sno, null);
+            delete updates.sno;
+            delete updates.currentStock;
+            delete updates.createdAt;
+            if (updateStockOnMatch && r.quantity !== '' && r.quantity !== null && r.quantity !== undefined) {
+              updates.currentStock = Number(r.quantity) || 0;
+              updates.masterOnly = false;
+            }
+            await updateDoc(doc(db, 'items', match.id), updates);
+            updated += 1;
+          } else {
+            const qty = Number(r.quantity) || 0;
+            const newRef = await addDoc(collection(db, 'items'), buildItemDoc(r, brand, nextSno, qty));
+            nextSno += 1;
+            if (qty > 0) {
+              await addDoc(collection(db, 'transactions'), {
+                itemId: newRef.id,
+                itemName: r.particulars,
+                brand,
+                type: 'opening',
+                direction: 'in',
+                quantity: qty,
+                reason: `Imported from ${sourceLabel}`,
+                performedByEmail: userEmail || '',
+                createdAt: serverTimestamp(),
+              });
+              checkAndSendLowStockAlert(newRef.id);
+            }
+            added += 1;
+          }
+        }
+        await logImportHistory({ rowsAdded: added, rowsUpdated: updated, rowsSkipped: skipped });
+        setSuccess(`${brand}: added ${added} new part(s), updated ${updated} existing part(s).`);
+        setRows([]);
       }
-      setSuccess(
-        `Imported ${toImport.length} item(s).` +
-          (skipped.length ? ` Skipped ${skipped.length} already-existing item(s): ${skipped.join(', ')}.` : '')
-      );
-      setRows([]);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -299,14 +412,54 @@ function NewItemsImport({ existingItems }) {
   return (
     <div className="space-y-6">
       <p className="text-gray-500 text-sm max-w-2xl">
-        Upload an Excel/CSV stock list for instant import, or a photo/PDF of a paper stock register or price list —
-        an AI model will read it and extract new items (with an opening quantity) for you to review before
-        anything is saved.
+        Upload a brand's Excel/CSV master list (or a photo/PDF of a paper register / price list — an AI model will
+        read it) to build the Master Spare Parts Catalogue. Every row must belong to the brand selected below; other
+        brands are never touched by this import.
       </p>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Brand *</label>
+            <select value={brand} onChange={(e) => setBrand(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
+              <option value="">Select brand...</option>
+              {brands.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Import Mode *</label>
+            <select value={importMode} onChange={(e) => setImportMode(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
+              <option value="upsert">Add / Update this brand's parts (safe — preserves existing stock)</option>
+              <option value="replace">Replace this brand's entire inventory (deletes everything not in the file)</option>
+            </select>
+          </div>
+        </div>
+
+        {importMode === 'upsert' && (
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={updateStockOnMatch} onChange={(e) => setUpdateStockOnMatch(e.target.checked)} />
+            Also overwrite Current Stock for parts that already exist and are matched (leave unchecked to only add new/master-catalogue parts)
+          </label>
+        )}
+
+        {importMode === 'replace' && (
+          <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded text-sm flex gap-2">
+            <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold">This deletes every existing {brand || '(brand)'} record not in the uploaded file.</p>
+              <p className="mt-1">Type the brand name to confirm:</p>
+              <input
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                placeholder={brand}
+                className="mt-2 px-3 py-1.5 border rounded w-48"
+              />
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white px-4 py-2 rounded-lg cursor-pointer">
+          <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer ${brand ? 'bg-emerald-700 hover:bg-emerald-800' : 'bg-gray-300 pointer-events-none'}`}>
             <UploadCloud size={18} />
             Choose File
             <input
@@ -315,6 +468,7 @@ function NewItemsImport({ existingItems }) {
               accept=".xlsx,.xls,.csv,image/*,application/pdf"
               onChange={handleFile}
               className="hidden"
+              disabled={!brand}
             />
           </label>
           <span className="text-sm text-gray-500 flex items-center gap-2">
@@ -338,92 +492,62 @@ function NewItemsImport({ existingItems }) {
 
       {rows.length > 0 && (
         <div className="bg-white rounded-lg shadow overflow-x-auto">
-          <div className="flex items-center justify-between p-4 border-b">
-            <h2 className="font-semibold text-gray-800">Review extracted rows ({rows.length})</h2>
+          <div className="flex items-center justify-between p-4 border-b flex-wrap gap-2">
+            <h2 className="font-semibold text-gray-800">
+              Review extracted rows ({rows.length})
+              {duplicatesInFile.size > 0 && (
+                <span className="ml-2 text-amber-700 text-xs font-normal bg-amber-50 border border-amber-200 px-2 py-1 rounded">
+                  {duplicatesInFile.size} duplicate part number(s) in this file
+                </span>
+              )}
+            </h2>
             <button
               onClick={handleImportAll}
               disabled={busy}
               className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg disabled:opacity-50"
             >
-              {busy ? 'Importing...' : `Import ${rows.length} Item(s)`}
+              {busy ? 'Importing...' : `Import ${rows.length} Row(s)`}
             </button>
           </div>
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Particulars</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Part Code</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Part Number</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Old Part No.</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Unit</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Opening Qty</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Rack No</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">HSN Code</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Avg Cost</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Reorder Level</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Stock Qty</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Storage</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Selling Price</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, idx) => (
-                <tr key={idx} className="border-b last:border-0">
+              {rows.map((r, idx) => {
+                const key = String(r.partCode || r.particulars || '').trim().toLowerCase();
+                const isDup = key && duplicatesInFile.has(key);
+                return (
+                <tr key={idx} className={`border-b last:border-0 ${isDup ? 'bg-amber-50' : ''}`}>
                   <td className="px-2 py-1">
-                    <input
-                      value={r.particulars}
-                      onChange={(e) => updateRow(idx, 'particulars', e.target.value)}
-                      className="w-full px-2 py-1 border rounded"
-                    />
+                    <input value={r.particulars} onChange={(e) => updateRow(idx, 'particulars', e.target.value)} className="w-48 px-2 py-1 border rounded" />
                   </td>
                   <td className="px-2 py-1">
-                    <input
-                      value={r.partCode}
-                      onChange={(e) => updateRow(idx, 'partCode', e.target.value)}
-                      placeholder="70.01.530S"
-                      className="w-28 px-2 py-1 border rounded"
-                    />
+                    <input value={r.partCode} onChange={(e) => updateRow(idx, 'partCode', e.target.value)} className="w-28 px-2 py-1 border rounded" />
                   </td>
                   <td className="px-2 py-1">
-                    <input
-                      value={r.unit}
-                      onChange={(e) => updateRow(idx, 'unit', e.target.value)}
-                      className="w-20 px-2 py-1 border rounded"
-                    />
+                    <input value={r.oldPartCode} onChange={(e) => updateRow(idx, 'oldPartCode', e.target.value)} className="w-28 px-2 py-1 border rounded" />
                   </td>
                   <td className="px-2 py-1">
-                    <input
-                      type="number"
-                      value={r.quantity}
-                      onChange={(e) => updateRow(idx, 'quantity', e.target.value)}
-                      className="w-24 px-2 py-1 border rounded"
-                    />
+                    <input value={r.unit} onChange={(e) => updateRow(idx, 'unit', e.target.value)} className="w-16 px-2 py-1 border rounded" />
                   </td>
                   <td className="px-2 py-1">
-                    <input
-                      value={r.rackNo}
-                      onChange={(e) => updateRow(idx, 'rackNo', e.target.value)}
-                      className="w-20 px-2 py-1 border rounded"
-                    />
+                    <input type="number" value={r.quantity} onChange={(e) => updateRow(idx, 'quantity', e.target.value)} className="w-20 px-2 py-1 border rounded" />
                   </td>
                   <td className="px-2 py-1">
-                    <input
-                      value={r.hsnCode}
-                      onChange={(e) => updateRow(idx, 'hsnCode', e.target.value)}
-                      className="w-24 px-2 py-1 border rounded"
-                    />
+                    <input value={r.rackNo} onChange={(e) => updateRow(idx, 'rackNo', e.target.value)} className="w-24 px-2 py-1 border rounded" />
                   </td>
                   <td className="px-2 py-1">
-                    <input
-                      type="number"
-                      value={r.avgCost}
-                      onChange={(e) => updateRow(idx, 'avgCost', e.target.value)}
-                      className="w-24 px-2 py-1 border rounded"
-                    />
-                  </td>
-                  <td className="px-2 py-1">
-                    <input
-                      type="number"
-                      value={r.reorderLevel}
-                      onChange={(e) => updateRow(idx, 'reorderLevel', e.target.value)}
-                      className="w-20 px-2 py-1 border rounded"
-                    />
+                    <input type="number" value={r.sellingPrice} onChange={(e) => updateRow(idx, 'sellingPrice', e.target.value)} className="w-24 px-2 py-1 border rounded" />
                   </td>
                   <td className="px-2 py-1">
                     <button onClick={() => removeRow(idx)} className="text-red-500 hover:text-red-700" title="Remove row">
@@ -431,11 +555,100 @@ function NewItemsImport({ existingItems }) {
                     </button>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
+
+      <ImportHistoryPanel />
+    </div>
+  );
+}
+
+function buildItemDoc(r, brand, sno, quantityOrNull) {
+  const oldPartNumbers = String(r.oldPartCode || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const qty = quantityOrNull === null ? undefined : Number(quantityOrNull) || 0;
+  const docData = {
+    sno,
+    brand,
+    particulars: String(r.particulars || '').trim(),
+    description: String(r.description || '').trim(),
+    partNumber: String(r.partCode || '').trim(),
+    partCode: String(r.partCode || '').trim(),
+    oldPartNumbers,
+    machineModels: String(r.machineModels || '').trim(),
+    category: String(r.category || '').trim(),
+    unit: String(r.unit || '').trim(),
+    supplier: String(r.supplier || '').trim(),
+    purchaseCost: Number(r.purchaseCost) || 0,
+    sellingPrice: Number(r.sellingPrice) || 0,
+    rackNo: String(r.rackNo || '').trim(),
+    minStock: Number(r.minStock) || 0,
+    maxStock: Number(r.maxStock) || 0,
+    reorderLevel: Number(r.reorderLevel) || 0,
+    hsnCode: String(r.hsnCode || '').trim(),
+    avgCost: Number(r.avgCost || r.purchaseCost) || 0,
+    remarks: String(r.notes || '').trim(),
+    updatedAt: serverTimestamp(),
+  };
+  if (qty !== undefined) {
+    docData.currentStock = qty;
+    docData.masterOnly = qty <= 0;
+    docData.createdAt = serverTimestamp();
+  }
+  return docData;
+}
+
+function ImportHistoryPanel() {
+  const [history, setHistory] = useState([]);
+  useEffect(() => {
+    const unsub = onSnapshot(query(collection(db, 'importHistory'), orderBy('importedAt', 'desc'), limit(20)), (snap) => {
+      setHistory(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+    return unsub;
+  }, []);
+
+  if (history.length === 0) return null;
+
+  return (
+    <div className="bg-white rounded-lg shadow overflow-x-auto">
+      <div className="flex items-center gap-2 p-4 border-b">
+        <History size={18} className="text-gray-500" />
+        <h2 className="font-semibold text-gray-800">Import History</h2>
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-gray-50 border-b">
+          <tr>
+            <th className="text-left px-3 py-2 font-semibold text-gray-600">When</th>
+            <th className="text-left px-3 py-2 font-semibold text-gray-600">Brand</th>
+            <th className="text-left px-3 py-2 font-semibold text-gray-600">Mode</th>
+            <th className="text-left px-3 py-2 font-semibold text-gray-600">File</th>
+            <th className="text-left px-3 py-2 font-semibold text-gray-600">By</th>
+            <th className="text-right px-3 py-2 font-semibold text-gray-600">Added</th>
+            <th className="text-right px-3 py-2 font-semibold text-gray-600">Updated</th>
+            <th className="text-right px-3 py-2 font-semibold text-gray-600">Deleted</th>
+          </tr>
+        </thead>
+        <tbody>
+          {history.map((h) => (
+            <tr key={h.id} className="border-b last:border-0">
+              <td className="px-3 py-2 text-gray-500">{h.importedAt?.toDate ? h.importedAt.toDate().toLocaleString() : ''}</td>
+              <td className="px-3 py-2 font-medium">{h.brand}</td>
+              <td className="px-3 py-2">{h.mode === 'replace' ? 'Replace' : 'Add/Update'}</td>
+              <td className="px-3 py-2 text-gray-500">{h.fileName}</td>
+              <td className="px-3 py-2 text-gray-500">{h.importedByEmail}</td>
+              <td className="px-3 py-2 text-right">{h.rowsAdded || 0}</td>
+              <td className="px-3 py-2 text-right">{h.rowsUpdated || 0}</td>
+              <td className="px-3 py-2 text-right">{h.deletedExisting || 0}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -454,9 +667,6 @@ function MovementImport({ existingItems, userEmail }) {
 
   const movement = MOVEMENT_TYPES.find((m) => m.id === movementType);
   const showUnitCost = movementType === 'purchase';
-  // Purchases and Returns both bring stock IN — both trigger the warehouse
-  // put-away workflow (Step 1 of the spec: location stays blank/pending
-  // immediately after the receipt is saved).
   const isReceiving = movement.direction === 'in';
 
   const itemOptions = useMemo(
@@ -488,9 +698,6 @@ function MovementImport({ existingItems, userEmail }) {
         };
       });
       setRows(withMatches);
-      // EXISTING STOCK check (per spec): before saving, look up whether this
-      // item already has storage locations recorded, and show them purely as
-      // reference — never auto-assigned.
       if (isReceiving) {
         const entries = await Promise.all(
           withMatches
@@ -557,7 +764,7 @@ function MovementImport({ existingItems, userEmail }) {
               throw new Error(`${itemSnap.data().particulars}: would make stock negative (current ${current}, qty ${qty}).`);
             }
 
-            const updates = { currentStock: newStock, updatedAt: serverTimestamp() };
+            const updates = { currentStock: newStock, updatedAt: serverTimestamp(), masterOnly: false };
             if (movement.id === 'purchase' && r.unitCost) {
               updates.avgCost = Number(r.unitCost);
             }
@@ -567,6 +774,7 @@ function MovementImport({ existingItems, userEmail }) {
             tx.set(txnRef, {
               itemId: r.itemId,
               itemName: itemSnap.data().particulars,
+              brand: itemSnap.data().brand || '',
               type: movement.id,
               direction: movement.direction,
               quantity: qty,
@@ -580,10 +788,6 @@ function MovementImport({ existingItems, userEmail }) {
             committedTxnId = txnRef.id;
           });
           await checkAndSendLowStockAlert(r.itemId);
-          // WAREHOUSE PUT-AWAY: every "in" movement (Purchase or Return) lands
-          // in stock immediately (already done above) but starts out with NO
-          // warehouse location — it's tracked as LOCATION PENDING until the
-          // admin uploads the completed Put-away Location Report.
           if (isReceiving) {
             await createPutawayLine({
               itemId: r.itemId,
@@ -747,7 +951,7 @@ function MovementImport({ existingItems, userEmail }) {
                     >
                       <option value="">No match — select item...</option>
                       {itemOptions.map((it) => (
-                        <option key={it.id} value={it.id}>{it.particulars} (stock: {it.currentStock})</option>
+                        <option key={it.id} value={it.id}>{it.brand ? `[${it.brand}] ` : ''}{it.particulars} (stock: {it.currentStock})</option>
                       ))}
                     </select>
                   </td>
