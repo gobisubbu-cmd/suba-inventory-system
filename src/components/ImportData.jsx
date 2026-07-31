@@ -32,10 +32,10 @@ import {
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
 import { createPutawayLine, getExistingLocationsForItem } from '../putaway';
-import { fetchBrands, ensureSeedBrands } from '../lib/brands';
+import { fetchBrands, ensureSeedBrands, allPartNumbers } from '../lib/brands';
 
 const FIELD_ALIASES = {
-  particulars: ['particulars', 'item', 'item name', 'name', 'part name', 'material'],
+  particulars: ['particulars', 'particular', 'item', 'item name', 'name', 'part name', 'material', 'description'],
   description: ['description', 'part description'],
   partCode: ['part number', 'part no', 'partno', 'part code', 'code', 'item code', 'new part number'],
   oldPartCode: ['old part number', 'old part no', 'superseded by', 'replaced by'],
@@ -76,6 +76,12 @@ function mapRow(rawRow) {
       out[field] = rawRow[matchKey];
     }
   });
+  // Quantity cells often come as "1 No.", "3 Nos.", "5 pcs" on real-world
+  // invoices/DCs rather than a bare number — pull out the numeric part.
+  if (out.quantity !== '' && out.quantity !== null) {
+    const m = String(out.quantity).match(/-?\d+(\.\d+)?/);
+    if (m) out.quantity = m[0];
+  }
   return out;
 }
 
@@ -115,17 +121,56 @@ function fileToBase64(file) {
   });
 }
 
-function findBestMatch(name, existingItems) {
-  const target = String(name || '').trim().toLowerCase();
-  if (!target) return null;
-  let match = existingItems.find((it) => it.particulars?.trim().toLowerCase() === target);
-  if (match) return match;
-  match = existingItems.find(
-    (it) =>
-      it.particulars?.trim().toLowerCase().includes(target) ||
-      target.includes(it.particulars?.trim().toLowerCase())
+function findBestMatch(name, existingItems, partCode) {
+  const tryMatchByText = (target) => {
+    if (!target) return null;
+    let match = existingItems.find((it) => it.particulars?.trim().toLowerCase() === target);
+    if (match) return match;
+    match = existingItems.find(
+      (it) =>
+        it.particulars?.trim().toLowerCase().includes(target) ||
+        target.includes(it.particulars?.trim().toLowerCase())
+    );
+    return match || null;
+  };
+  const tryMatchByPartNumber = (code) => {
+    if (!code) return null;
+    const target = String(code).trim().toLowerCase();
+    if (!target) return null;
+    return (
+      existingItems.find((it) =>
+        allPartNumbers(it).some((pn) => String(pn).trim().toLowerCase() === target)
+      ) || null
+    );
+  };
+  const nameTarget = String(name || '').trim().toLowerCase();
+  const codeTarget = String(partCode || '').trim().toLowerCase();
+  // Real-world invoices/DCs often list a part CODE in what looks like a
+  // "Particulars" column — try an exact part-number match first (covers
+  // both the dedicated partCode field and the case where the particulars
+  // text itself is actually a part code), then fall back to fuzzy text.
+  return (
+    tryMatchByPartNumber(codeTarget) ||
+    tryMatchByPartNumber(nameTarget) ||
+    tryMatchByText(nameTarget)
   );
-  return match || null;
+}
+
+const ALL_ALIASES = new Set(Object.values(FIELD_ALIASES).flat());
+
+// Real invoices/DCs/registers frequently have a handful of metadata rows
+// (company name, document number, date, customer) above the actual item
+// table. Scan for the first row that looks like a real header — i.e. has
+// at least two cells matching a known column alias — instead of blindly
+// assuming row 1 is the header.
+function findHeaderRowIndex(grid) {
+  for (let i = 0; i < grid.length; i++) {
+    const row = grid[i];
+    if (!Array.isArray(row)) continue;
+    const matches = row.filter((cell) => ALL_ALIASES.has(normalizeHeader(cell))).length;
+    if (matches >= 2) return i;
+  }
+  return 0;
 }
 
 async function extractRowsFromFile(file) {
@@ -137,8 +182,22 @@ async function extractRowsFromFile(file) {
     const buffer = await file.arrayBuffer();
     const wb = XLSX.read(buffer, { type: 'array' });
     const sheet = wb.Sheets[wb.SheetNames[0]];
-    const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: null });
-    return rawRows.map(mapRow).filter((r) => r.particulars);
+    const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+    const headerIdx = findHeaderRowIndex(grid);
+    const headers = (grid[headerIdx] || []).map((h) => String(h || '').trim());
+    const rawRows = grid
+      .slice(headerIdx + 1)
+      .filter((r) => Array.isArray(r) && r.some((c) => c !== null && String(c).trim() !== ''))
+      .map((r) => {
+        const obj = {};
+        headers.forEach((h, idx) => {
+          if (h) obj[h] = r[idx] ?? null;
+        });
+        return obj;
+      });
+    return rawRows
+      .map(mapRow)
+      .filter((r) => r.particulars && !/^total\b/i.test(String(r.particulars).trim()));
   }
 
   if (isPdf || isImage) {
@@ -689,7 +748,7 @@ function MovementImport({ existingItems, userEmail }) {
         setError('No recognizable item rows found in that file.');
       }
       const withMatches = mapped.map((r) => {
-        const match = findBestMatch(r.particulars, existingItems);
+        const match = findBestMatch(r.particulars, existingItems, r.partCode);
         return {
           particulars: r.particulars,
           quantity: r.quantity ?? '',
