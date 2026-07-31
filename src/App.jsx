@@ -5,6 +5,8 @@ import { doc, getDoc } from 'firebase/firestore';
 import Login from './components/Login';
 import Navigation from './components/Navigation';
 import Dashboard from './components/Dashboard';
+import Overview from './components/Overview';
+import ReorderItems from './components/ReorderItems';
 import ManageItems from './components/ManageItems';
 import ImportData from './components/ImportData';
 import StockAdjustment from './components/StockAdjustment';
@@ -74,6 +76,10 @@ export default function App() {
     switch (currentView) {
       case 'dashboard':
         return <Dashboard userRole={userRole} userEmail={user.email} />;
+      case 'overview':
+        return <Overview userRole={userRole} onViewChange={setCurrentView} />;
+      case 'reorder':
+        return <ReorderItems userRole={userRole} />;
       case 'brands':
         return <Brands userRole={userRole} />;
       case 'items':

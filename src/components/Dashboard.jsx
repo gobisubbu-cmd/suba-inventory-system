@@ -1,19 +1,20 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
-import { collection, onSnapshot, orderBy, query, limit, addDoc, serverTimestamp } from 'firebase/firestore';
-import { Search, Package, AlertTriangle, PackageX, Wallet, Layers, PackageCheck, Clock } from 'lucide-react';
-import { LOCATION_STATUS, computePutawayStats } from '../putaway';
+import { collection, onSnapshot, orderBy, query, addDoc, serverTimestamp } from 'firebase/firestore';
+import { Search, Package } from 'lucide-react';
 import { computeStockStatus, STOCK_STATUS_STYLES } from '../lib/brands';
 
 const PAGE_SIZE = 100;
 
+// Dashboard is now the search-first landing page: just the search box and
+// the items it matches. Stats, brand breakdown, put-away alerts and recent
+// activity have moved to the Overview page; low/out-of-stock items needing
+// reorder have moved to the Reorder Items page (see Navigation.jsx).
 export default function Dashboard({ userRole, userEmail }) {
   const [items, setItems] = useState([]);
-  const [transactions, setTransactions] = useState([]);
   const [search, setSearch] = useState('');
   const [brandFilter, setBrandFilter] = useState('All');
   const [page, setPage] = useState(0);
-  const [putawayStats, setPutawayStats] = useState(null);
   const canSeeValue = userRole === 'admin' || userRole === 'inventory_manager';
 
   useEffect(() => {
@@ -24,23 +25,10 @@ export default function Dashboard({ userRole, userEmail }) {
     return unsub;
   }, []);
 
-  useEffect(() => {
-    const q = query(collection(db, 'transactions'), orderBy('createdAt', 'desc'), limit(30));
-    const unsub = onSnapshot(q, (snap) => {
-      setTransactions(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    });
-    return unsub;
-  }, []);
-
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, 'putawayLines'), (snap) => {
-      const pending = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() }))
-        .filter((l) => l.status !== LOCATION_STATUS.COMPLETE);
-      setPutawayStats(computePutawayStats(pending));
-    });
-    return unsub;
-  }, []);
+  const brandOptions = useMemo(() => {
+    const set = new Set(items.map((it) => it.brand || 'Unassigned'));
+    return ['All', ...[...set].sort()];
+  }, [items]);
 
   const filtered = useMemo(() => {
     const s = search.trim().toLowerCase();
@@ -76,130 +64,11 @@ export default function Dashboard({ userRole, userEmail }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
-  const summary = useMemo(() => {
-    let totalValue = 0;
-    let lowStock = 0;
-    let outOfStock = 0;
-    let notStocked = 0;
-    let pendingReorder = 0;
-    const byBrand = {};
-    items.forEach((it) => {
-      const status = computeStockStatus(it);
-      const value = Number(it.currentStock || 0) * Number(it.avgCost || it.purchaseCost || 0);
-      totalValue += value;
-      if (status === 'Low Stock') { lowStock += 1; pendingReorder += 1; }
-      if (status === 'Out of Stock') { outOfStock += 1; pendingReorder += 1; }
-      if (status === 'Not Stocked') notStocked += 1;
-      const b = it.brand || 'Unassigned';
-      byBrand[b] = (byBrand[b] || 0) + 1;
-    });
-    return { totalValue, lowStock, outOfStock, notStocked, pendingReorder, total: items.length, byBrand };
-  }, [items]);
-
-  const lowStockItems = useMemo(() => {
-    return items
-      .filter((it) => computeStockStatus(it) === 'Low Stock' || computeStockStatus(it) === 'Out of Stock')
-      .sort((a, b) => Number(a.currentStock || 0) - Number(b.currentStock || 0))
-      .slice(0, 24);
-  }, [items]);
-
-  const brandOptions = ['All', ...Object.keys(summary.byBrand).sort()];
-
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Package className="text-emerald-700" size={28} />
-          <h1 className="text-3xl font-bold text-gray-800">Dashboard</h1>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <SummaryCard icon={Layers} label="Total Spare Parts" value={summary.total.toLocaleString('en-IN')} />
-        {canSeeValue && (
-          <SummaryCard icon={Wallet} label="Total Inventory Value" value={`₹${summary.totalValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`} />
-        )}
-        <SummaryCard icon={AlertTriangle} label="Low + Out of Stock" value={summary.pendingReorder.toLocaleString('en-IN')} tone="amber" />
-        <SummaryCard icon={PackageX} label="Not Stocked (catalogue only)" value={summary.notStocked.toLocaleString('en-IN')} tone="gray" />
-      </div>
-
-      <div className="bg-white rounded-lg shadow p-4">
-        <h2 className="font-semibold text-gray-700 mb-3 flex items-center gap-2"><Layers size={16} /> Brand-wise Stock</h2>
-        <div className="flex flex-wrap gap-2">
-          {Object.entries(summary.byBrand).sort().map(([brand, count]) => (
-            <button
-              key={brand}
-              onClick={() => setBrandFilter(brand)}
-              className={`px-3 py-2 rounded-lg border text-sm ${brandFilter === brand ? 'bg-emerald-700 text-white border-emerald-700' : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'}`}
-            >
-              {brand}: <span className="font-semibold">{count}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {putawayStats && putawayStats.pendingItems > 0 && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <PackageX className="text-amber-600 shrink-0" size={20} />
-            <h2 className="font-bold text-amber-800">Warehouse locations pending</h2>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-            <div className="bg-white rounded-lg p-3 border border-amber-100">
-              <p className="text-gray-500 text-xs">Pending Purchase Invoices</p>
-              <p className="text-lg font-bold text-gray-800">{putawayStats.pendingInvoices}</p>
-            </div>
-            <div className="bg-white rounded-lg p-3 border border-amber-100">
-              <p className="text-gray-500 text-xs">Pending Items</p>
-              <p className="text-lg font-bold text-gray-800">{putawayStats.pendingItems}</p>
-            </div>
-            <div className="bg-white rounded-lg p-3 border border-amber-100">
-              <p className="text-gray-500 text-xs">Pending Quantity</p>
-              <p className="text-lg font-bold text-gray-800">{putawayStats.pendingQty}</p>
-            </div>
-            <div className="bg-white rounded-lg p-3 border border-amber-100">
-              <p className="text-gray-500 text-xs">Oldest / Newest Pending</p>
-              <p className="text-lg font-bold text-gray-800">{putawayStats.oldestDays}d / {putawayStats.newestDays}d</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {lowStockItems.length > 0 && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <AlertTriangle className="text-red-600 shrink-0" size={20} />
-            <h2 className="font-bold text-red-800">
-              {summary.pendingReorder} item{summary.pendingReorder > 1 ? 's need' : ' needs'} reordering (showing first 24)
-            </h2>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {lowStockItems.map((it) => {
-              const stock = Number(it.currentStock || 0);
-              const out = stock <= 0;
-              return (
-                <button
-                  key={it.id}
-                  onClick={() => setSearch(it.particulars || '')}
-                  title="Click to filter the table to this item"
-                  className={`text-left px-3 py-2 rounded-lg border text-sm transition hover:shadow ${
-                    out ? 'bg-red-100 border-red-300 text-red-800' : 'bg-amber-50 border-amber-300 text-amber-900'
-                  }`}
-                >
-                  <span className="font-semibold">[{it.brand || '—'}] {it.particulars}</span>
-                  <span className="block text-xs mt-0.5">
-                    {out ? 'Out of stock' : `${stock} ${it.unit || ''} left`} · reorder at {it.reorderLevel}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      <div className="grid md:grid-cols-2 gap-4">
-        <RecentActivity title="Recently Issued Parts" icon={PackageX} tone="red" txns={transactions.filter((t) => t.direction === 'out').slice(0, 8)} />
-        <RecentActivity title="Recently Purchased Parts" icon={PackageCheck} tone="green" txns={transactions.filter((t) => t.type === 'purchase' || t.type === 'opening').slice(0, 8)} />
+      <div className="flex items-center gap-3">
+        <Package className="text-emerald-700" size={28} />
+        <h1 className="text-3xl font-bold text-gray-800">Dashboard</h1>
       </div>
 
       <div className="flex flex-wrap gap-3 items-end">
@@ -207,6 +76,7 @@ export default function Dashboard({ userRole, userEmail }) {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
           <input
             type="text"
+            autoFocus
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by particulars, part number, rack no, HSN code, S.No..."
@@ -241,7 +111,7 @@ export default function Dashboard({ userRole, userEmail }) {
             {pageItems.length === 0 && (
               <tr>
                 <td colSpan={canSeeValue ? 10 : 9} className="px-4 py-8 text-center text-gray-400">
-                  No items found.
+                  {search.trim() ? 'No items found.' : 'Start typing to search the catalogue.'}
                 </td>
               </tr>
             )}
@@ -285,51 +155,6 @@ export default function Dashboard({ userRole, userEmail }) {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function SummaryCard({ icon: Icon, label, value, tone = 'emerald' }) {
-  const tones = {
-    emerald: 'bg-emerald-50 text-emerald-700',
-    amber: 'bg-amber-50 text-amber-700',
-    gray: 'bg-gray-100 text-gray-600',
-  };
-  return (
-    <div className="bg-white rounded-lg shadow p-4 flex items-center gap-3">
-      <div className={`p-2 rounded-lg ${tones[tone]}`}><Icon size={20} /></div>
-      <div>
-        <p className="text-xs text-gray-500">{label}</p>
-        <p className="text-lg font-bold text-gray-800">{value}</p>
-      </div>
-    </div>
-  );
-}
-
-function RecentActivity({ title, icon: Icon, tone, txns }) {
-  const tones = { red: 'text-red-600', green: 'text-green-600' };
-  return (
-    <div className="bg-white rounded-lg shadow p-4">
-      <h2 className="font-semibold text-gray-700 mb-3 flex items-center gap-2"><Icon size={16} className={tones[tone]} /> {title}</h2>
-      {txns.length === 0 ? (
-        <p className="text-sm text-gray-400">No recent activity.</p>
-      ) : (
-        <ul className="space-y-2">
-          {txns.map((t) => (
-            <li key={t.id} className="flex items-center justify-between text-sm border-b last:border-0 pb-2 last:pb-0">
-              <div>
-                <span className="font-medium text-gray-800">{t.itemName}</span>
-                {t.brand && <span className="text-gray-400 ml-1">[{t.brand}]</span>}
-              </div>
-              <div className="flex items-center gap-2 text-gray-500">
-                <span>{t.quantity}</span>
-                <Clock size={12} />
-                <span className="text-xs">{t.createdAt?.toDate ? t.createdAt.toDate().toLocaleDateString() : ''}</span>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }
