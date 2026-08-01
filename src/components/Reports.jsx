@@ -3,7 +3,7 @@ import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 import { BarChart3, Download } from 'lucide-react';
-import { daysPending, ageingColour, LOCATION_STATUS } from '../putaway';
+import { daysPending, LOCATION_STATUS } from '../putaway';
 import { computeStockStatus } from '../lib/brands';
 
 function toDate(ts) {
@@ -237,6 +237,20 @@ export default function Reports({ userRole }) {
           'Reorder Level': it.reorderLevel,
           Status: status,
         }))
+    );
+  };
+
+  const exportCurrentStockReport = () => {
+    download(
+      'current_stock_report.xlsx',
+      items.map((it) => ({
+        Brand: it.brand || 'Unassigned',
+        'Part Number': it.partNumber || it.partCode || '',
+        Particulars: it.particulars,
+        'Current Stock': it.currentStock,
+        'Reorder Level': it.reorderLevel,
+        Status: computeStockStatus(it),
+      }))
     );
   };
 
@@ -508,7 +522,7 @@ export default function Reports({ userRole }) {
         <h2 className="font-semibold text-gray-800">Brand &amp; Master Catalogue Reports</h2>
         <div className="flex flex-wrap gap-3">
           <ReportButton label="Brand-wise Inventory" onClick={exportBrandWise} />
-          <ReportButton label="Current Stock Report" onClick={exportInventoryValuation} />
+          <ReportButton label="Current Stock Report" onClick={exportCurrentStockReport} />
           <ReportButton label="Low Stock Report" onClick={() => exportByStatus('Low Stock', 'low_stock_report.xlsx')} />
           <ReportButton label="Out-of-Stock Report" onClick={() => exportByStatus('Out of Stock', 'out_of_stock_report.xlsx')} />
           <ReportButton label="Not Stocked Parts" onClick={() => exportByStatus('Not Stocked', 'not_stocked_parts.xlsx')} />
