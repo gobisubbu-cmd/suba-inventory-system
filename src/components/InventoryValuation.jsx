@@ -21,7 +21,10 @@ export default function InventoryValuation({ userRole }) {
     let outOfStock = 0;
     items.forEach((it) => {
       const stock = Number(it.currentStock || 0);
-      const cost = Number(it.avgCost || 0);
+      // Fall back to Standard Purchase Cost when no Avg Cost has been
+      // recorded yet — matches Reports.jsx / Dashboard.jsx / Brands.jsx so
+      // this page doesn't undercount items priced only via Purchase Cost.
+      const cost = Number(it.avgCost || it.purchaseCost || 0);
       totalValue += stock * cost;
       availableStock += stock;
       if (stock <= 0) outOfStock += 1;
@@ -59,21 +62,24 @@ export default function InventoryValuation({ userRole }) {
             <tr>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Particulars</th>
               <th className="text-right px-4 py-3 font-semibold text-gray-600">Current Stock</th>
-              <th className="text-right px-4 py-3 font-semibold text-gray-600">Avg Purchase Cost</th>
+              <th className="text-right px-4 py-3 font-semibold text-gray-600">Avg / Purchase Cost</th>
               <th className="text-right px-4 py-3 font-semibold text-gray-600">Valuation</th>
             </tr>
           </thead>
           <tbody>
-            {items.map((it) => (
-              <tr key={it.id} className="border-b last:border-0 hover:bg-gray-50">
-                <td className="px-4 py-3 font-medium text-gray-800">{it.particulars}</td>
-                <td className="px-4 py-3 text-right">{it.currentStock}</td>
-                <td className="px-4 py-3 text-right">₹{Number(it.avgCost || 0).toFixed(2)}</td>
-                <td className="px-4 py-3 text-right font-medium">
-                  ₹{(Number(it.currentStock || 0) * Number(it.avgCost || 0)).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                </td>
-              </tr>
-            ))}
+            {items.map((it) => {
+              const cost = Number(it.avgCost || it.purchaseCost || 0);
+              return (
+                <tr key={it.id} className="border-b last:border-0 hover:bg-gray-50">
+                  <td className="px-4 py-3 font-medium text-gray-800">{it.particulars}</td>
+                  <td className="px-4 py-3 text-right">{it.currentStock}</td>
+                  <td className="px-4 py-3 text-right">₹{cost.toFixed(2)}</td>
+                  <td className="px-4 py-3 text-right font-medium">
+                    ₹{(Number(it.currentStock || 0) * cost).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                  </td>
+                </tr>
+              );
+            })}
             {items.length === 0 && (
               <tr>
                 <td colSpan={4} className="px-4 py-8 text-center text-gray-400">No items yet.</td>

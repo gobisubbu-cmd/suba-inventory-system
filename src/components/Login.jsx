@@ -1,14 +1,15 @@
 import React, { useState } from 'react';
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
-import { auth, db } from '../firebase';
-import { setDoc, doc } from 'firebase/firestore';
+import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
+import { auth } from '../firebase';
 import { Lock, Eye, EyeOff } from 'lucide-react';
 
+// Self-signup has been removed. New accounts are created by an admin via
+// the "Manage Users" screen (which sets the role explicitly and safely).
+// This prevents anyone who finds the site URL from creating their own
+// account and granting themselves Admin access.
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [isSignUp, setIsSignUp] = useState(false);
-  const [role, setRole] = useState('staff');
   const [error, setError] = useState('');
   const [resetSent, setResetSent] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -21,16 +22,7 @@ export default function Login() {
     setResetSent(false);
 
     try {
-      if (isSignUp) {
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        await setDoc(doc(db, 'users', userCredential.user.uid), {
-          email,
-          role,
-          createdAt: new Date(),
-        });
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
-      }
+      await signInWithEmailAndPassword(auth, email, password);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -95,15 +87,13 @@ export default function Login() {
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="block text-sm font-medium text-gray-700">Password</label>
-              {!isSignUp && (
-                <button
-                  type="button"
-                  onClick={handleForgotPassword}
-                  className="text-sm text-emerald-700 hover:underline"
-                >
-                  Forgot password?
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                className="text-sm text-emerald-700 hover:underline"
+              >
+                Forgot password?
+              </button>
             </div>
             <div className="relative">
               <input
@@ -125,43 +115,18 @@ export default function Login() {
             </div>
           </div>
 
-          {isSignUp && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Role</label>
-              <select
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-emerald-600"
-              >
-                <option value="staff">Staff</option>
-                <option value="inventory_manager">Inventory Manager</option>
-                <option value="admin">Admin</option>
-              </select>
-            </div>
-          )}
-
           <button
             type="submit"
             disabled={loading}
             className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg transition disabled:opacity-50"
           >
-            {loading ? 'Please wait...' : (isSignUp ? 'Create Account' : 'Sign In')}
+            {loading ? 'Please wait...' : 'Sign In'}
           </button>
         </form>
 
         <div className="mt-6 text-center">
-          <p className="text-gray-600 text-sm">
-            {isSignUp ? 'Already have an account?' : "Don't have an account?"}
-            <button
-              onClick={() => {
-                setIsSignUp(!isSignUp);
-                setError('');
-                setResetSent(false);
-              }}
-              className="text-emerald-700 hover:underline ml-2 font-medium"
-            >
-              {isSignUp ? 'Sign In' : 'Sign Up'}
-            </button>
+          <p className="text-gray-400 text-xs">
+            Need an account? Ask an Admin to add you under Manage Users.
           </p>
         </div>
       </div>

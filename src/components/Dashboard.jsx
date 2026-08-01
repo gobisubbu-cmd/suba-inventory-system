@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query, addDoc, serverTimestamp } from 'firebase/firestore';
 import { Search, Package } from 'lucide-react';
-import { computeStockStatus, STOCK_STATUS_STYLES } from '../lib/brands';
+import { computeStockStatus, STOCK_STATUS_STYLES, allPartNumbers } from '../lib/brands';
 
 const PAGE_SIZE = 100;
 
@@ -35,9 +35,15 @@ export default function Dashboard({ userRole, userEmail }) {
     return items.filter((it) => {
       if (brandFilter !== 'All' && (it.brand || 'Unassigned') !== brandFilter) return false;
       if (!s) return true;
+      // Matches on current part number, any superseded/old part number, or
+      // legacy partCode field — same logic as Spare Search, so a query like
+      // an old RATIONAL part number finds the item here too.
+      const partNumberHit = [...allPartNumbers(it), it.partCode].some((p) =>
+        String(p || '').toLowerCase().includes(s)
+      );
       return (
         (it.particulars || '').toLowerCase().includes(s) ||
-        (it.partNumber || it.partCode || '').toLowerCase().includes(s) ||
+        partNumberHit ||
         (it.rackNo || '').toLowerCase().includes(s) ||
         (it.hsnCode || '').toLowerCase().includes(s) ||
         String(it.sno || '').includes(s)
@@ -79,7 +85,7 @@ export default function Dashboard({ userRole, userEmail }) {
             autoFocus
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by particulars, part number, rack no, HSN code, S.No..."
+            placeholder="Search by particulars, part number (old or new), rack no, HSN code, S.No..."
             className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-emerald-600"
           />
         </div>
