@@ -66,6 +66,18 @@ function normalizeHeader(h) {
   return String(h || '').trim().toLowerCase();
 }
 
+const NUMERIC_FIELDS = ['quantity', 'avgCost', 'purchaseCost', 'sellingPrice', 'reorderLevel', 'minStock', 'maxStock'];
+
+// Real-world invoices/DCs/handwritten chits write numbers messily — "1 No.",
+// "3 Nos.", "Rs. 1,250/-", "₹150" — pull out just the numeric core so these
+// don't silently become 0 / NaN downstream.
+function cleanNumeric(v) {
+  if (v === null || v === undefined || v === '') return v;
+  const s = String(v).replace(/,/g, '');
+  const m = s.match(/-?\d+(\.\d+)?/);
+  return m ? m[0] : v;
+}
+
 function mapRow(rawRow) {
   const out = {};
   Object.keys(FIELD_ALIASES).forEach((f) => (out[f] = ''));
@@ -76,12 +88,9 @@ function mapRow(rawRow) {
       out[field] = rawRow[matchKey];
     }
   });
-  // Quantity cells often come as "1 No.", "3 Nos.", "5 pcs" on real-world
-  // invoices/DCs rather than a bare number — pull out the numeric part.
-  if (out.quantity !== '' && out.quantity !== null) {
-    const m = String(out.quantity).match(/-?\d+(\.\d+)?/);
-    if (m) out.quantity = m[0];
-  }
+  NUMERIC_FIELDS.forEach((f) => {
+    out[f] = cleanNumeric(out[f]);
+  });
   return out;
 }
 
@@ -92,15 +101,15 @@ function normalizeAiItem(item) {
     partCode: item.partCode || '',
     oldPartCode: item.oldPartCode || '',
     unit: item.unit || '',
-    quantity: item.quantity ?? '',
+    quantity: cleanNumeric(item.quantity ?? ''),
     rackNo: item.rackNo || '',
     hsnCode: item.hsnCode || '',
-    avgCost: item.avgCost ?? '',
-    purchaseCost: item.purchaseCost ?? '',
-    sellingPrice: item.sellingPrice ?? '',
-    reorderLevel: item.reorderLevel ?? '',
-    minStock: item.minStock ?? '',
-    maxStock: item.maxStock ?? '',
+    avgCost: cleanNumeric(item.avgCost ?? ''),
+    purchaseCost: cleanNumeric(item.purchaseCost ?? ''),
+    sellingPrice: cleanNumeric(item.sellingPrice ?? ''),
+    reorderLevel: cleanNumeric(item.reorderLevel ?? ''),
+    minStock: cleanNumeric(item.minStock ?? ''),
+    maxStock: cleanNumeric(item.maxStock ?? ''),
     category: item.category || '',
     machineModels: item.machineModels || '',
     supplier: item.supplier || '',
@@ -173,6 +182,91 @@ function findHeaderRowIndex(grid) {
   return 0;
 }
 
+const DOC_TYPE_LABELS = {
+  purchase: 'Purchase Invoice',
+  dc: 'Delivery Challan',
+  issue: 'Sales Invoice',
+  return: 'Return / Credit Note',
+};
+
+// Real invoices/DCs/chits usually have a few header rows above the item
+// table (company name, document number, date, customer/supplier). Scan
+// those rows for common clues so we can (a) guess whether this document is
+// a Purchase / DC / Sale / Return, and (b) pre-fill the reference number
+// and party name instead of making the person retype them.
+function detectDocumentMeta(metaRows) {
+  const fieldMap = {};
+  const blobParts = [];
+  (metaRows || []).forEach((row) => {
+    if (!Array.isArray(row)) return;
+    const cells = row.map((c) => (c === null || c === undefined ? '' : String(c).trim())).filter(Boolean);
+    cells.forEach((c) => blobParts.push(c));
+    if (cells.length >= 2) {
+      fieldMap[normalizeHeader(cells[0])] = cells[1];
+    }
+  });
+  const blob = blobParts.join(' | ');
+
+  let documentType = null;
+  if (/delivery\s*(note|challan)/i.test(blob)) documentType = 'dc';
+  else if (/credit\s*note|sales?\s*return|purchase\s*return/i.test(blob)) documentType = 'return';
+  else if (/purchase\s*(invoice|order|bill)/i.test(blob)) documentType = 'purchase';
+  else if (/tax\s*invoice|sale\s*invoice|bill of supply|\binvoice\b/i.test(blob)) documentType = 'issue';
+
+  let documentNumber = null;
+  for (const [label, value] of Object.entries(fieldMap)) {
+    if (/no\.?$|number$/i.test(label) && !/hsn|gst|pan|phone|mobile/i.test(label)) {
+      documentNumber = value;
+      break;
+    }
+  }
+  if (!documentNumber) {
+    const m = blob.match(/(?:d\.?c\.?|delivery\s*note|invoice|order|challan)[^\d]{0,15}(\d[\w\-/]*)/i);
+    if (m) documentNumber = m[1];
+  }
+
+  let partyName = null;
+  for (const [label, value] of Object.entries(fieldMap)) {
+    if (/customer|supplier|party|buyer|vendor/i.test(label)) {
+      partyName = value;
+      break;
+    }
+  }
+
+  let documentDate = null;
+  for (const [label, value] of Object.entries(fieldMap)) {
+    if (/date$/i.test(label)) {
+      documentDate = value;
+      break;
+    }
+  }
+
+  if (!documentType && !documentNumber && !partyName) return null;
+  return { documentType, documentNumber, partyName, documentDate };
+}
+
+const AI_DOC_TYPE_MAP = {
+  purchase_invoice: 'purchase',
+  delivery_challan: 'dc',
+  sales_invoice: 'issue',
+  credit_note: 'return',
+  stock_register: null,
+  price_list: null,
+  other: null,
+};
+
+function mapAiDocumentMeta(docInfo) {
+  if (!docInfo) return null;
+  const documentType = AI_DOC_TYPE_MAP[docInfo.documentType] ?? null;
+  if (!documentType && !docInfo.documentNumber && !docInfo.partyName) return null;
+  return {
+    documentType,
+    documentNumber: docInfo.documentNumber || null,
+    partyName: docInfo.partyName || null,
+    documentDate: docInfo.documentDate || null,
+  };
+}
+
 async function extractRowsFromFile(file) {
   const isSpreadsheet = /\.(xlsx|xls|csv)$/i.test(file.name);
   const isPdf = file.type === 'application/pdf';
@@ -195,9 +289,11 @@ async function extractRowsFromFile(file) {
         });
         return obj;
       });
-    return rawRows
+    const rows = rawRows
       .map(mapRow)
       .filter((r) => r.particulars && !/^total\b/i.test(String(r.particulars).trim()));
+    const meta = detectDocumentMeta(grid.slice(0, headerIdx));
+    return { rows, meta };
   }
 
   if (isPdf || isImage) {
@@ -214,7 +310,9 @@ async function extractRowsFromFile(file) {
     if (!response.ok) {
       throw new Error(data.error || 'AI extraction failed.');
     }
-    return (data.items || []).map(normalizeAiItem).filter((r) => r.particulars);
+    const rows = (data.items || []).map(normalizeAiItem).filter((r) => r.particulars);
+    const meta = mapAiDocumentMeta(data.document);
+    return { rows, meta };
   }
 
   throw new Error('Unsupported file type. Upload an Excel/CSV file, a photo (JPG/PNG), or a PDF.');
@@ -267,7 +365,7 @@ export default function ImportData({ userRole, userEmail }) {
       </div>
 
       {mode === 'newItems' ? (
-        <NewItemsImport existingItems={existingItems} userEmail={userEmail} />
+        <NewItemsImport existingItems={existingItems} userEmail={userEmail} onSuggestMovement={() => setMode('movement')} />
       ) : (
         <MovementImport existingItems={existingItems} userEmail={userEmail} />
       )}
@@ -275,7 +373,7 @@ export default function ImportData({ userRole, userEmail }) {
   );
 }
 
-function NewItemsImport({ existingItems, userEmail }) {
+function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
   const [brands, setBrands] = useState([]);
   const [brand, setBrand] = useState('');
   const [importMode, setImportMode] = useState('upsert'); // 'upsert' | 'replace'
@@ -286,6 +384,7 @@ function NewItemsImport({ existingItems, userEmail }) {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [sourceLabel, setSourceLabel] = useState('');
+  const [detectedMeta, setDetectedMeta] = useState(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -312,14 +411,16 @@ function NewItemsImport({ existingItems, userEmail }) {
     setError('');
     setSuccess('');
     setRows([]);
+    setDetectedMeta(null);
     setSourceLabel(file.name);
     setBusy(true);
     try {
-      const mapped = await extractRowsFromFile(file);
+      const { rows: mapped, meta } = await extractRowsFromFile(file);
       if (mapped.length === 0) {
         setError('No recognizable item rows found in that file.');
       }
       setRows(mapped);
+      setDetectedMeta(meta);
     } catch (err) {
       setError(err.message || 'Failed to read that file.');
     } finally {
@@ -541,6 +642,31 @@ function NewItemsImport({ existingItems, userEmail }) {
           )}
         </div>
 
+        {detectedMeta && detectedMeta.documentType && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded text-sm flex items-start gap-2">
+            <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold">
+                This looks like a {DOC_TYPE_LABELS[detectedMeta.documentType] || 'movement document'}
+                {detectedMeta.documentNumber ? ` (#${detectedMeta.documentNumber})` : ''}
+                {detectedMeta.partyName ? ` — ${detectedMeta.partyName}` : ''}, not a new-items catalogue list.
+              </p>
+              <p className="mt-1">
+                This tab only adds/updates catalogue entries. Switch to <strong>"Record Purchase / Issue / DC"</strong> so
+                it updates stock and the ledger correctly.
+              </p>
+              {onSuggestMovement && (
+                <button
+                  onClick={onSuggestMovement}
+                  className="mt-2 text-xs font-semibold bg-amber-100 hover:bg-amber-200 text-amber-900 px-3 py-1.5 rounded"
+                >
+                  Switch tab now
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
         {success && (
           <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-2 rounded text-sm flex items-start gap-2">
@@ -722,6 +848,7 @@ function MovementImport({ existingItems, userEmail }) {
   const [success, setSuccess] = useState('');
   const [sourceLabel, setSourceLabel] = useState('');
   const [existingLocationsByItem, setExistingLocationsByItem] = useState({});
+  const [detectedMeta, setDetectedMeta] = useState(null);
   const fileInputRef = useRef(null);
 
   const movement = MOVEMENT_TYPES.find((m) => m.id === movementType);
@@ -739,11 +866,12 @@ function MovementImport({ existingItems, userEmail }) {
     setError('');
     setSuccess('');
     setRows([]);
+    setDetectedMeta(null);
     setSourceLabel(file.name);
     setReason(file.name.replace(/\.[^/.]+$/, ''));
     setBusy(true);
     try {
-      const mapped = await extractRowsFromFile(file);
+      const { rows: mapped, meta } = await extractRowsFromFile(file);
       if (mapped.length === 0) {
         setError('No recognizable item rows found in that file.');
       }
@@ -757,6 +885,18 @@ function MovementImport({ existingItems, userEmail }) {
         };
       });
       setRows(withMatches);
+      setDetectedMeta(meta);
+      // Auto-pick the movement type and pre-fill reference/party from what
+      // was detected in the document — the person can still override both.
+      if (meta?.documentType && MOVEMENT_TYPES.some((m) => m.id === meta.documentType)) {
+        setMovementType(meta.documentType);
+      }
+      if (meta?.documentNumber) {
+        setReason(meta.documentNumber);
+      }
+      if (meta?.partyName) {
+        setSupplier(meta.partyName);
+      }
       if (isReceiving) {
         const entries = await Promise.all(
           withMatches
@@ -963,6 +1103,15 @@ function MovementImport({ existingItems, userEmail }) {
             someone physically puts the goods away and the completed Put-away Report is uploaded — see the
             "Put-away" section in the left menu.
           </p>
+        )}
+
+        {detectedMeta && (detectedMeta.documentType || detectedMeta.documentNumber || detectedMeta.partyName) && (
+          <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-2 rounded text-sm">
+            Detected: {DOC_TYPE_LABELS[detectedMeta.documentType] || 'Document'}
+            {detectedMeta.documentNumber ? ` #${detectedMeta.documentNumber}` : ''}
+            {detectedMeta.partyName ? ` — ${detectedMeta.partyName}` : ''}
+            {detectedMeta.documentType ? '. Movement Type set automatically above — change it if that\'s wrong.' : '.'}
+          </div>
         )}
 
         {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
