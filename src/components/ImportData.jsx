@@ -28,6 +28,7 @@ import {
   ArrowLeftRight,
   AlertTriangle,
   History,
+  Tags,
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
@@ -319,7 +320,7 @@ async function extractRowsFromFile(file) {
 }
 
 export default function ImportData({ userRole, userEmail }) {
-  const [mode, setMode] = useState('newItems'); // 'newItems' | 'movement'
+  const [mode, setMode] = useState('newItems'); // 'newItems' | 'movement' | 'bulkBrand'
   const [existingItems, setExistingItems] = useState([]);
 
   useEffect(() => {
@@ -362,12 +363,24 @@ export default function ImportData({ userRole, userEmail }) {
         >
           <ArrowLeftRight size={16} /> Record Purchase / Issue / DC
         </button>
+        <button
+          onClick={() => setMode('bulkBrand')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+            mode === 'bulkBrand' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Tags size={16} /> Bulk Update Brand
+        </button>
       </div>
 
-      {mode === 'newItems' ? (
+      {mode === 'newItems' && (
         <NewItemsImport existingItems={existingItems} userEmail={userEmail} onSuggestMovement={() => setMode('movement')} />
-      ) : (
+      )}
+      {mode === 'movement' && (
         <MovementImport existingItems={existingItems} userEmail={userEmail} />
+      )}
+      {mode === 'bulkBrand' && (
+        <BulkBrandUpdate existingItems={existingItems} userEmail={userEmail} />
       )}
     </div>
   );
@@ -1209,6 +1222,163 @@ function MovementImport({ existingItems, userEmail }) {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+// Bulk Update Brand — the app's usual Import Data flow adds/updates items
+// scoped to ONE brand per upload; it was never meant to bulk-edit the brand
+// field on rows that already exist. This mode fills that gap: upload a
+// sheet with S.No + Brand columns (exactly what "Current Stock Report" /
+// the brand-marking export produces), match each row to an existing item by
+// its S.No, and update only the brand field — everything else about the
+// item (stock, cost, location, etc.) is left untouched.
+const SNO_ALIASES = ['s.no', 'sno', 's no', 'serial no', 'serial number', 's. no'];
+const BULK_BRAND_ALIASES = ['brand'];
+
+function parseBulkBrandFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read that file.'));
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'binary' });
+        // Prefer a sheet literally called "Mark Brands" (what this app's own
+        // export produces); otherwise scan every sheet for one whose header
+        // row has both an S.No-like column and a Brand column.
+        const sheetOrder = wb.SheetNames.includes('Mark Brands')
+          ? ['Mark Brands', ...wb.SheetNames.filter((n) => n !== 'Mark Brands')]
+          : wb.SheetNames;
+
+        for (const name of sheetOrder) {
+          const grid = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null });
+          for (let i = 0; i < Math.min(grid.length, 10); i++) {
+            const headerRow = (grid[i] || []).map((h) => normalizeHeader(h));
+            const snoIdx = headerRow.findIndex((h) => SNO_ALIASES.includes(h));
+            const brandIdx = headerRow.findIndex((h) => BULK_BRAND_ALIASES.includes(h));
+            if (snoIdx !== -1 && brandIdx !== -1) {
+              const rows = grid
+                .slice(i + 1)
+                .map((r) => ({ sno: r[snoIdx], brand: r[brandIdx] }))
+                .filter((r) => r.sno !== null && r.sno !== undefined && r.sno !== '');
+              resolve(rows);
+              return;
+            }
+          }
+        }
+        reject(new Error('Could not find both an "S.No" column and a "Brand" column in this file.'));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.readAsBinaryString(file);
+  });
+}
+
+function BulkBrandUpdate({ existingItems, userEmail }) {
+  const fileInputRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError('');
+    setResult(null);
+    setBusy(true);
+    try {
+      const rows = await parseBulkBrandFile(file);
+      if (rows.length === 0) {
+        setError('No rows found under the S.No / Brand columns.');
+        return;
+      }
+
+      const bySno = new Map();
+      existingItems.forEach((it) => bySno.set(Number(it.sno), it));
+
+      let updated = 0;
+      let unchanged = 0;
+      let notFound = 0;
+      let leftUnassigned = 0;
+      const toWrite = [];
+
+      rows.forEach((r) => {
+        const sno = Number(r.sno);
+        const newBrand = String(r.brand || '').trim();
+        if (!newBrand || newBrand.toLowerCase() === 'unassigned') {
+          leftUnassigned += 1;
+          return;
+        }
+        const item = bySno.get(sno);
+        if (!item) {
+          notFound += 1;
+          return;
+        }
+        if ((item.brand || '') === newBrand) {
+          unchanged += 1;
+          return;
+        }
+        toWrite.push({ id: item.id, brand: newBrand });
+      });
+
+      const batchSize = 400;
+      for (let i = 0; i < toWrite.length; i += batchSize) {
+        const batch = writeBatch(db);
+        toWrite.slice(i, i + batchSize).forEach((w) => {
+          batch.update(doc(db, 'items', w.id), { brand: w.brand, updatedAt: serverTimestamp() });
+        });
+        await batch.commit();
+        updated += Math.min(batchSize, toWrite.length - i);
+      }
+
+      await addDoc(collection(db, 'importHistory'), {
+        brand: 'ALL',
+        mode: 'bulkBrandUpdate',
+        fileName: file.name,
+        importedByEmail: userEmail || '',
+        importedAt: serverTimestamp(),
+        rowsAdded: 0,
+        rowsUpdated: updated,
+        rowsSkipped: unchanged + notFound + leftUnassigned,
+      });
+
+      setResult({ updated, unchanged, notFound, leftUnassigned, total: rows.length });
+    } catch (err) {
+      setError(err.message || 'Failed to process that file.');
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 space-y-4">
+      <p className="text-sm text-gray-600 max-w-2xl">
+        Upload a sheet with an <strong>S.No</strong> column and a <strong>Brand</strong> column — exactly what you get
+        from Reports &rarr; Current Stock Report, or the brand-marking list. Each row is matched to an existing item
+        by its S.No and only its <strong>Brand</strong> field is updated; stock, cost, location and everything else
+        on the item is left exactly as it was. Rows left as "Unassigned" are skipped, so you can send this back
+        partly filled in and finish the rest later.
+      </p>
+
+      {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
+
+      {result && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded text-sm space-y-1">
+          <p className="font-semibold">Done — {result.updated} item(s) updated.</p>
+          <p>
+            {result.unchanged} already had that brand &middot; {result.leftUnassigned} left as Unassigned (skipped)
+            {result.notFound > 0 && <> &middot; {result.notFound} S.No not found (item may have been deleted/renumbered)</>}
+          </p>
+        </div>
+      )}
+
+      <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer w-fit ${busy ? 'bg-gray-300 pointer-events-none' : 'bg-emerald-700 hover:bg-emerald-800'}`}>
+        {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
+        {busy ? 'Applying...' : 'Upload S.No + Brand File'}
+        <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy} />
+      </label>
     </div>
   );
 }
