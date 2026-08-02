@@ -13,7 +13,11 @@ function toDate(ts) {
 }
 
 function download(filename, rows) {
-  const ws = XLSX.utils.json_to_sheet(rows);
+  // json_to_sheet([]) produces a totally blank sheet with no header row at
+  // all, which looks exactly like a broken/failed export. Make a genuinely
+  // empty result set say so explicitly instead.
+  const safeRows = rows && rows.length > 0 ? rows : [{ Note: 'No records found for this report.' }];
+  const ws = XLSX.utils.json_to_sheet(safeRows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
   XLSX.writeFile(wb, filename);
@@ -29,24 +33,46 @@ export default function Reports({ userRole }) {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
+  // Firestore's onSnapshot listeners deliver data asynchronously — if a
+  // report button is clicked before the first snapshot arrives, `items`
+  // (and friends) are still their initial empty arrays, and every export
+  // silently writes a blank spreadsheet with zero rows. Track when each
+  // collection has delivered its first batch so we can disable the report
+  // buttons (and explain why) until real data is in hand.
+  const [loaded, setLoaded] = useState({
+    items: false,
+    transactions: false,
+    putawayLines: false,
+    engineerIssues: false,
+    engineerReturns: false,
+    sparePartsUsed: false,
+  });
+  const dataReady = Object.values(loaded).every(Boolean);
+
   useEffect(() => {
     const unsubItems = onSnapshot(query(collection(db, 'items'), orderBy('sno', 'asc')), (snap) => {
       setItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoaded((l) => (l.items ? l : { ...l, items: true }));
     });
     const unsubTxns = onSnapshot(query(collection(db, 'transactions'), orderBy('createdAt', 'desc')), (snap) => {
       setTransactions(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoaded((l) => (l.transactions ? l : { ...l, transactions: true }));
     });
     const unsubPutaway = onSnapshot(query(collection(db, 'putawayLines'), orderBy('createdAt', 'desc')), (snap) => {
       setPutawayLines(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoaded((l) => (l.putawayLines ? l : { ...l, putawayLines: true }));
     });
     const unsubIssues = onSnapshot(collection(db, 'engineerIssues'), (snap) => {
       setEngineerIssues(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoaded((l) => (l.engineerIssues ? l : { ...l, engineerIssues: true }));
     });
     const unsubReturns = onSnapshot(collection(db, 'engineerReturns'), (snap) => {
       setEngineerReturns(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoaded((l) => (l.engineerReturns ? l : { ...l, engineerReturns: true }));
     });
     const unsubUsed = onSnapshot(collection(db, 'sparePartsUsed'), (snap) => {
       setSparePartsUsed(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setLoaded((l) => (l.sparePartsUsed ? l : { ...l, sparePartsUsed: true }));
     });
     return () => {
       unsubItems();
@@ -507,33 +533,40 @@ export default function Reports({ userRole }) {
         <h1 className="text-3xl font-bold text-gray-800">Reports</h1>
       </div>
 
+      {!dataReady && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm">
+          Loading data from the database — report buttons will switch on in a moment. Please don't
+          export yet; exporting before this finishes produces an empty file.
+        </div>
+      )}
+
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
         <h2 className="font-semibold text-gray-800">Quick Reports</h2>
         <div className="flex flex-wrap gap-3">
-          <ReportButton label="Stock Summary" onClick={exportStockSummary} />
-          <ReportButton label="Low / Critical Stock" onClick={exportLowStock} />
-          <ReportButton label="Purchases Only" onClick={() => exportMovements('purchase')} />
-          <ReportButton label="Issues Only" onClick={() => exportMovements('issue')} />
-          <ReportButton label="All Transactions (raw)" onClick={() => exportMovements(null)} />
+          <ReportButton disabled={!dataReady} label="Stock Summary" onClick={exportStockSummary} />
+          <ReportButton disabled={!dataReady} label="Low / Critical Stock" onClick={exportLowStock} />
+          <ReportButton disabled={!dataReady} label="Purchases Only" onClick={() => exportMovements('purchase')} />
+          <ReportButton disabled={!dataReady} label="Issues Only" onClick={() => exportMovements('issue')} />
+          <ReportButton disabled={!dataReady} label="All Transactions (raw)" onClick={() => exportMovements(null)} />
         </div>
       </div>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
         <h2 className="font-semibold text-gray-800">Brand &amp; Master Catalogue Reports</h2>
         <div className="flex flex-wrap gap-3">
-          <ReportButton label="Brand-wise Inventory" onClick={exportBrandWise} />
-          <ReportButton label="Current Stock Report" onClick={exportCurrentStockReport} />
-          <ReportButton label="Low Stock Report" onClick={() => exportByStatus('Low Stock', 'low_stock_report.xlsx')} />
-          <ReportButton label="Out-of-Stock Report" onClick={() => exportByStatus('Out of Stock', 'out_of_stock_report.xlsx')} />
-          <ReportButton label="Not Stocked Parts" onClick={() => exportByStatus('Not Stocked', 'not_stocked_parts.xlsx')} />
-          <ReportButton label="Inventory Valuation" onClick={exportInventoryValuation} />
-          <ReportButton label="Fast Moving Spares" onClick={exportFastMoving} />
-          <ReportButton label="Slow Moving Spares" onClick={exportSlowMoving} />
-          <ReportButton label="Dead Stock" onClick={exportDeadStock} />
-          <ReportButton label="Machine-wise Spare Parts" onClick={exportMachineWise} />
-          <ReportButton label="Supplier-wise Spare Parts" onClick={exportSupplierWise} />
-          <ReportButton label="Reorder Report" onClick={exportReorderReport} />
-          <ReportButton label="Old ↔ New Part Number Cross-ref" onClick={exportOldNewPartNumbers} />
+          <ReportButton disabled={!dataReady} label="Brand-wise Inventory" onClick={exportBrandWise} />
+          <ReportButton disabled={!dataReady} label="Current Stock Report" onClick={exportCurrentStockReport} />
+          <ReportButton disabled={!dataReady} label="Low Stock Report" onClick={() => exportByStatus('Low Stock', 'low_stock_report.xlsx')} />
+          <ReportButton disabled={!dataReady} label="Out-of-Stock Report" onClick={() => exportByStatus('Out of Stock', 'out_of_stock_report.xlsx')} />
+          <ReportButton disabled={!dataReady} label="Not Stocked Parts" onClick={() => exportByStatus('Not Stocked', 'not_stocked_parts.xlsx')} />
+          <ReportButton disabled={!dataReady} label="Inventory Valuation" onClick={exportInventoryValuation} />
+          <ReportButton disabled={!dataReady} label="Fast Moving Spares" onClick={exportFastMoving} />
+          <ReportButton disabled={!dataReady} label="Slow Moving Spares" onClick={exportSlowMoving} />
+          <ReportButton disabled={!dataReady} label="Dead Stock" onClick={exportDeadStock} />
+          <ReportButton disabled={!dataReady} label="Machine-wise Spare Parts" onClick={exportMachineWise} />
+          <ReportButton disabled={!dataReady} label="Supplier-wise Spare Parts" onClick={exportSupplierWise} />
+          <ReportButton disabled={!dataReady} label="Reorder Report" onClick={exportReorderReport} />
+          <ReportButton disabled={!dataReady} label="Old ↔ New Part Number Cross-ref" onClick={exportOldNewPartNumbers} />
         </div>
         {brands.length > 0 && <p className="text-xs text-gray-400">Brands in system: {brands.join(', ')}</p>}
       </div>
@@ -541,29 +574,29 @@ export default function Reports({ userRole }) {
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
         <h2 className="font-semibold text-gray-800">Engineer Issue &amp; Return Reports</h2>
         <div className="flex flex-wrap gap-3">
-          <ReportButton label="Engineer-wise Issue" onClick={exportEngineerIssues} />
-          <ReportButton label="Engineer-wise Return" onClick={exportEngineerReturns} />
-          <ReportButton label="Consumption by Engineer" onClick={exportConsumptionByEngineer} />
-          <ReportButton label="Customer-wise Usage" onClick={exportCustomerWiseUsage} />
-          <ReportButton label="Service Job-wise Usage" onClick={exportJobWiseUsage} />
-          <ReportButton label="Pending with Engineers" onClick={exportPendingWithEngineers} />
-          <ReportButton label="Lost / Damaged Parts" onClick={exportLostDamaged} />
-          <ReportButton label="Monthly Consumption" onClick={exportMonthlyConsumption} />
-          <ReportButton label="Spare Parts Audit Trail" onClick={exportEngineerAuditTrail} />
+          <ReportButton disabled={!dataReady} label="Engineer-wise Issue" onClick={exportEngineerIssues} />
+          <ReportButton disabled={!dataReady} label="Engineer-wise Return" onClick={exportEngineerReturns} />
+          <ReportButton disabled={!dataReady} label="Consumption by Engineer" onClick={exportConsumptionByEngineer} />
+          <ReportButton disabled={!dataReady} label="Customer-wise Usage" onClick={exportCustomerWiseUsage} />
+          <ReportButton disabled={!dataReady} label="Service Job-wise Usage" onClick={exportJobWiseUsage} />
+          <ReportButton disabled={!dataReady} label="Pending with Engineers" onClick={exportPendingWithEngineers} />
+          <ReportButton disabled={!dataReady} label="Lost / Damaged Parts" onClick={exportLostDamaged} />
+          <ReportButton disabled={!dataReady} label="Monthly Consumption" onClick={exportMonthlyConsumption} />
+          <ReportButton disabled={!dataReady} label="Spare Parts Audit Trail" onClick={exportEngineerAuditTrail} />
         </div>
       </div>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
         <h2 className="font-semibold text-gray-800">Warehouse Put-away Reports</h2>
         <div className="flex flex-wrap gap-3">
-          <ReportButton label="Put-away Report" onClick={exportPutawayReport} />
-          <ReportButton label="Pending Location Report" onClick={exportPendingLocationReport} />
-          <ReportButton label="Completed Location Report" onClick={exportCompletedLocationReport} />
-          <ReportButton label="Ageing Report" onClick={exportAgeingReport} />
-          <ReportButton label="Location-wise Stock" onClick={() => exportLocationWiseStock('location')} />
-          <ReportButton label="Rack-wise Stock" onClick={() => exportLocationWiseStock('rack')} />
-          <ReportButton label="Shelf-wise Stock" onClick={() => exportLocationWiseStock('shelf')} />
-          <ReportButton label="Bin-wise Stock" onClick={() => exportLocationWiseStock('bin')} />
+          <ReportButton disabled={!dataReady} label="Put-away Report" onClick={exportPutawayReport} />
+          <ReportButton disabled={!dataReady} label="Pending Location Report" onClick={exportPendingLocationReport} />
+          <ReportButton disabled={!dataReady} label="Completed Location Report" onClick={exportCompletedLocationReport} />
+          <ReportButton disabled={!dataReady} label="Ageing Report" onClick={exportAgeingReport} />
+          <ReportButton disabled={!dataReady} label="Location-wise Stock" onClick={() => exportLocationWiseStock('location')} />
+          <ReportButton disabled={!dataReady} label="Rack-wise Stock" onClick={() => exportLocationWiseStock('rack')} />
+          <ReportButton disabled={!dataReady} label="Shelf-wise Stock" onClick={() => exportLocationWiseStock('shelf')} />
+          <ReportButton disabled={!dataReady} label="Bin-wise Stock" onClick={() => exportLocationWiseStock('bin')} />
         </div>
         <p className="text-xs text-gray-400">
           For full Location History (every location change with user/date/time), see Warehouse Put-away &rarr;
@@ -582,7 +615,7 @@ export default function Reports({ userRole }) {
             <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
             <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="px-3 py-2 border rounded-lg" />
           </div>
-          <ReportButton label="Export Range" onClick={() => exportMovements(null)} />
+          <ReportButton disabled={!dataReady} label="Export Range" onClick={() => exportMovements(null)} />
         </div>
 
         <div className="overflow-x-auto mt-4">
@@ -621,11 +654,17 @@ export default function Reports({ userRole }) {
   );
 }
 
-function ReportButton({ label, onClick }) {
+function ReportButton({ label, onClick, disabled }) {
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-2 border border-emerald-700 text-emerald-700 hover:bg-emerald-50 px-4 py-2 rounded-lg text-sm"
+      disabled={disabled}
+      title={disabled ? 'Loading data — please wait a moment before exporting.' : undefined}
+      className={`flex items-center gap-2 border px-4 py-2 rounded-lg text-sm ${
+        disabled
+          ? 'border-gray-300 text-gray-400 cursor-not-allowed'
+          : 'border-emerald-700 text-emerald-700 hover:bg-emerald-50'
+      }`}
     >
       <Download size={16} /> {label}
     </button>
