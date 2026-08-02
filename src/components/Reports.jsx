@@ -281,17 +281,28 @@ export default function Reports({ userRole }) {
   };
 
   const exportInventoryValuation = () => {
-    download(
-      'inventory_valuation.xlsx',
-      items.map((it) => ({
-        Brand: it.brand || 'Unassigned',
-        'Part Number': it.partNumber || it.partCode || '',
-        Particulars: it.particulars,
-        'Current Stock': it.currentStock,
-        'Avg / Purchase Cost': it.avgCost || it.purchaseCost || 0,
-        'Stock Value': Number(it.currentStock || 0) * Number(it.avgCost || it.purchaseCost || 0),
-      }))
-    );
+    // Only items actually in stock — the catalogue is full of "Not Stocked"
+    // master entries (e.g. thousands of RATIONAL parts never received) that
+    // would otherwise bury the items that actually carry value. Matches the
+    // on-screen Inventory Valuation page.
+    const stockedRows = items
+      .filter((it) => Number(it.currentStock || 0) > 0)
+      .map((it) => {
+        const cost = Number(it.avgCost || it.purchaseCost || 0);
+        return {
+          Brand: it.brand || 'Unassigned',
+          'Part Number': it.partNumber || it.partCode || '',
+          Particulars: it.particulars,
+          'Current Stock': it.currentStock,
+          'Avg / Purchase Cost': cost,
+          'Stock Value': Number(it.currentStock || 0) * cost,
+        };
+      });
+    const totalValue = stockedRows.reduce((sum, r) => sum + r['Stock Value'], 0);
+    download('inventory_valuation.xlsx', [
+      ...stockedRows,
+      { Brand: '', 'Part Number': '', Particulars: `TOTAL (${stockedRows.length} items in stock)`, 'Current Stock': '', 'Avg / Purchase Cost': '', 'Stock Value': totalValue },
+    ]);
   };
 
   const movementFrequency = useMemo(() => {
