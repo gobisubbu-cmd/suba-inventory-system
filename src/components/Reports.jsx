@@ -103,19 +103,36 @@ export default function Reports({ userRole }) {
   const outOfStock = items.filter((it) => Number(it.currentStock || 0) <= 0);
 
   const exportStockSummary = () => {
-    download(
-      'stock_summary.xlsx',
-      items.map((it) => ({
-        'S.No': it.sno,
-        Particulars: it.particulars,
-        Unit: it.unit,
-        'Rack No': it.rackNo,
-        'HSN Code': it.hsnCode,
-        'Current Stock': it.currentStock,
-        'Reorder Level': it.reorderLevel,
-        ...(canSeeValue ? { 'Avg Cost': it.avgCost, 'Stock Value': Number(it.currentStock || 0) * Number(it.avgCost || 0) } : {}),
-      }))
-    );
+    // Only items actually in stock — the catalogue also holds thousands of
+    // "Not Stocked" master entries (parts never received) that would
+    // otherwise bury the items you actually hold. Matches Inventory
+    // Valuation's export.
+    const stockedItems = items.filter((it) => Number(it.currentStock || 0) > 0);
+    const rows = stockedItems.map((it) => ({
+      'S.No': it.sno,
+      Particulars: it.particulars,
+      Unit: it.unit,
+      'Rack No': it.rackNo,
+      'HSN Code': it.hsnCode,
+      'Current Stock': it.currentStock,
+      'Reorder Level': it.reorderLevel,
+      ...(canSeeValue ? { 'Avg Cost': it.avgCost, 'Stock Value': Number(it.currentStock || 0) * Number(it.avgCost || 0) } : {}),
+    }));
+    if (canSeeValue) {
+      const totalValue = stockedItems.reduce((sum, it) => sum + Number(it.currentStock || 0) * Number(it.avgCost || 0), 0);
+      rows.push({
+        'S.No': '',
+        Particulars: `TOTAL (${stockedItems.length} items in stock)`,
+        Unit: '',
+        'Rack No': '',
+        'HSN Code': '',
+        'Current Stock': '',
+        'Reorder Level': '',
+        'Avg Cost': '',
+        'Stock Value': totalValue,
+      });
+    }
+    download('stock_summary.xlsx', rows);
   };
 
   const exportLowStock = () => {
@@ -267,17 +284,27 @@ export default function Reports({ userRole }) {
   };
 
   const exportCurrentStockReport = () => {
-    download(
-      'current_stock_report.xlsx',
-      items.map((it) => ({
-        Brand: it.brand || 'Unassigned',
-        'Part Number': it.partNumber || it.partCode || '',
-        Particulars: it.particulars,
-        'Current Stock': it.currentStock,
-        'Reorder Level': it.reorderLevel,
-        Status: computeStockStatus(it),
-      }))
-    );
+    // Only items actually in stock — "Low Stock Report", "Out-of-Stock
+    // Report" and "Not Stocked Parts" already cover those statuses on their
+    // own buttons, so this one is purely "what do I currently hold."
+    const stockedItems = items.filter((it) => Number(it.currentStock || 0) > 0);
+    const rows = stockedItems.map((it) => ({
+      Brand: it.brand || 'Unassigned',
+      'Part Number': it.partNumber || it.partCode || '',
+      Particulars: it.particulars,
+      'Current Stock': it.currentStock,
+      'Reorder Level': it.reorderLevel,
+      Status: computeStockStatus(it),
+    }));
+    rows.push({
+      Brand: '',
+      'Part Number': '',
+      Particulars: `TOTAL (${stockedItems.length} items in stock)`,
+      'Current Stock': stockedItems.reduce((sum, it) => sum + Number(it.currentStock || 0), 0),
+      'Reorder Level': '',
+      Status: '',
+    });
+    download('current_stock_report.xlsx', rows);
   };
 
   const exportInventoryValuation = () => {
