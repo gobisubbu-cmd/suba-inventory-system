@@ -33,6 +33,24 @@ export default function InventoryValuation({ userRole }) {
     return { totalValue, availableStock, lowStock, outOfStock };
   }, [items]);
 
+  // Table only lists items actually in stock — the catalogue is full of
+  // "Not Stocked" master entries (e.g. thousands of RATIONAL parts never
+  // received) that would otherwise bury the items that actually carry
+  // value. The stat cards above still reflect everything.
+  const stockedItems = useMemo(
+    () => items.filter((it) => Number(it.currentStock || 0) > 0),
+    [items]
+  );
+
+  const tableTotal = useMemo(
+    () =>
+      stockedItems.reduce((sum, it) => {
+        const cost = Number(it.avgCost || it.purchaseCost || 0);
+        return sum + Number(it.currentStock || 0) * cost;
+      }, 0),
+    [stockedItems]
+  );
+
   if (userRole !== 'admin' && userRole !== 'inventory_manager') {
     return (
       <div className="max-w-md mx-auto mt-20 text-center text-gray-500">
@@ -67,7 +85,7 @@ export default function InventoryValuation({ userRole }) {
             </tr>
           </thead>
           <tbody>
-            {items.map((it) => {
+            {stockedItems.map((it) => {
               const cost = Number(it.avgCost || it.purchaseCost || 0);
               return (
                 <tr key={it.id} className="border-b last:border-0 hover:bg-gray-50">
@@ -80,12 +98,24 @@ export default function InventoryValuation({ userRole }) {
                 </tr>
               );
             })}
-            {items.length === 0 && (
+            {stockedItems.length === 0 && (
               <tr>
-                <td colSpan={4} className="px-4 py-8 text-center text-gray-400">No items yet.</td>
+                <td colSpan={4} className="px-4 py-8 text-center text-gray-400">No items in stock yet.</td>
               </tr>
             )}
           </tbody>
+          {stockedItems.length > 0 && (
+            <tfoot>
+              <tr className="border-t-2 border-gray-200 bg-gray-50">
+                <td className="px-4 py-3 font-bold text-gray-800" colSpan={3}>
+                  Total ({stockedItems.length} item{stockedItems.length === 1 ? '' : 's'} in stock)
+                </td>
+                <td className="px-4 py-3 text-right font-bold text-gray-900">
+                  ₹{tableTotal.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                </td>
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
     </div>
