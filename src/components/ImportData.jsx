@@ -28,6 +28,7 @@ import {
   AlertTriangle,
   History,
   Tags,
+  Coins,
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
@@ -319,7 +320,7 @@ async function extractRowsFromFile(file) {
 }
 
 export default function ImportData({ userRole, userEmail }) {
-  const [mode, setMode] = useState('newItems'); // 'newItems' | 'movement' | 'bulkBrand'
+  const [mode, setMode] = useState('newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice'
   const [existingItems, setExistingItems] = useState([]);
 
   useEffect(() => {
@@ -370,6 +371,14 @@ export default function ImportData({ userRole, userEmail }) {
         >
           <Tags size={16} /> Bulk Update Brand
         </button>
+        <button
+          onClick={() => setMode('bulkPrice')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+            mode === 'bulkPrice' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Coins size={16} /> Bulk Update Price
+        </button>
       </div>
 
       {mode === 'newItems' && (
@@ -380,6 +389,9 @@ export default function ImportData({ userRole, userEmail }) {
       )}
       {mode === 'bulkBrand' && (
         <BulkBrandUpdate existingItems={existingItems} userEmail={userEmail} />
+      )}
+      {mode === 'bulkPrice' && (
+        <BulkPriceUpdate existingItems={existingItems} userEmail={userEmail} />
       )}
     </div>
   );
@@ -1417,6 +1429,228 @@ function BulkBrandUpdate({ existingItems, userEmail }) {
         {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
         {busy ? 'Applying...' : 'Upload S.No + Brand File'}
         <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy} />
+      </label>
+    </div>
+  );
+}
+
+// Bulk Update Price — the regular "Add/Update" import rewrites every field
+// on a matched row (unit, rack, reorder level, etc.), so re-uploading a
+// price-only file through that path would blank out everything else on
+// items that already exist. This mode matches by Part Number (new or old)
+// within one brand and updates ONLY Purchase Cost / Avg Cost — the two
+// fields Inventory Valuation actually reads (avgCost, falling back to
+// purchaseCost) — leaving stock, particulars, location, etc. untouched.
+const PRICE_PN_ALIASES = ['part number', 'new part number', 'part no', 'partno', 'part code', 'code'];
+const PRICE_OLD_PN_ALIASES = ['old part number', 'old part number(s)', 'old part no', 'old part no.', 'superseded by', 'replaced by'];
+const PRICE_VALUE_ALIASES = ['price', 'purchase cost', 'standard purchase cost', 'cost', 'list price', 'selling price', 'standard selling price'];
+
+function parsePriceValue(v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  let s = String(v).trim().replace(/[₹$]/g, '').trim();
+  if (!s) return null;
+  if (/^\d{1,3}(\.\d{3})+,\d+$/.test(s)) {
+    // European thousands+decimal, e.g. "1.473,00"
+    s = s.replace(/\./g, '').replace(',', '.');
+  } else if (/^\d+,\d{1,2}$/.test(s)) {
+    // European decimal only, e.g. "99,00"
+    s = s.replace(',', '.');
+  } else {
+    s = s.replace(/,/g, '');
+  }
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parsePriceFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read that file.'));
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'binary' });
+        for (const name of wb.SheetNames) {
+          const grid = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null });
+          for (let i = 0; i < Math.min(grid.length, 10); i++) {
+            const headerRow = (grid[i] || []).map((h) => normalizeHeader(h));
+            const pnIdx = headerRow.findIndex((h) => PRICE_PN_ALIASES.includes(h));
+            const oldIdx = headerRow.findIndex((h) => PRICE_OLD_PN_ALIASES.includes(h));
+            const priceIdx = headerRow.findIndex((h) => PRICE_VALUE_ALIASES.includes(h));
+            if (pnIdx !== -1 && priceIdx !== -1) {
+              const rows = grid
+                .slice(i + 1)
+                .map((r) => ({
+                  partNumber: String(r[pnIdx] || '').trim(),
+                  oldPartNumbers: oldIdx !== -1
+                    ? String(r[oldIdx] || '').split(',').map((s) => s.trim()).filter(Boolean)
+                    : [],
+                  price: parsePriceValue(r[priceIdx]),
+                }))
+                .filter((r) => r.partNumber || r.oldPartNumbers.length);
+              resolve(rows);
+              return;
+            }
+          }
+        }
+        reject(new Error('Could not find a Part Number column and a Price column in this file.'));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.readAsBinaryString(file);
+  });
+}
+
+function BulkPriceUpdate({ existingItems, userEmail }) {
+  const fileInputRef = useRef(null);
+  const [brands, setBrands] = useState([]);
+  const [brand, setBrand] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    fetchBrands().then(setBrands);
+  }, []);
+
+  const brandItems = useMemo(() => existingItems.filter((it) => it.brand === brand), [existingItems, brand]);
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError('');
+    setResult(null);
+    if (!brand) {
+      setError('Select a brand first — pricing updates are scoped to one brand at a time.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const rows = await parsePriceFile(file);
+      if (rows.length === 0) {
+        setError('No rows found under the Part Number / Price columns.');
+        return;
+      }
+
+      // Index every existing item in this brand by every part number it's
+      // known under (current + old), so a price row matches regardless of
+      // which number the item was originally entered with.
+      const byPartNumber = new Map();
+      brandItems.forEach((it) => {
+        const keys = [...allPartNumbers(it), it.partCode]
+          .map((p) => String(p || '').trim().toLowerCase())
+          .filter(Boolean);
+        keys.forEach((k) => {
+          if (!byPartNumber.has(k)) byPartNumber.set(k, new Set());
+          byPartNumber.get(k).add(it.id);
+        });
+      });
+      const itemById = new Map(brandItems.map((it) => [it.id, it]));
+
+      let notFound = 0;
+      let skippedNoPrice = 0;
+      const toWrite = new Map(); // item id -> price
+
+      rows.forEach((r) => {
+        if (r.price === null) {
+          skippedNoPrice += 1;
+          return;
+        }
+        const keys = [r.partNumber, ...r.oldPartNumbers]
+          .map((p) => String(p || '').trim().toLowerCase())
+          .filter(Boolean);
+        const matchedIds = new Set();
+        keys.forEach((k) => {
+          const ids = byPartNumber.get(k);
+          if (ids) ids.forEach((id) => matchedIds.add(id));
+        });
+        if (matchedIds.size === 0) {
+          notFound += 1;
+          return;
+        }
+        matchedIds.forEach((id) => toWrite.set(id, r.price));
+      });
+
+      let unchanged = 0;
+      const finalWrites = [];
+      toWrite.forEach((price, id) => {
+        const item = itemById.get(id);
+        const currentCost = Number(item.avgCost || item.purchaseCost || 0);
+        if (currentCost === Number(price)) {
+          unchanged += 1;
+          return;
+        }
+        finalWrites.push({ id, price });
+      });
+
+      const batchSize = 400;
+      for (let i = 0; i < finalWrites.length; i += batchSize) {
+        const batch = writeBatch(db);
+        finalWrites.slice(i, i + batchSize).forEach((w) => {
+          batch.update(doc(db, 'items', w.id), {
+            purchaseCost: Number(w.price),
+            avgCost: Number(w.price),
+            updatedAt: serverTimestamp(),
+          });
+        });
+        await batch.commit();
+      }
+
+      await addDoc(collection(db, 'importHistory'), {
+        brand,
+        mode: 'bulkPriceUpdate',
+        fileName: file.name,
+        importedByEmail: userEmail || '',
+        importedAt: serverTimestamp(),
+        rowsAdded: 0,
+        rowsUpdated: finalWrites.length,
+        rowsSkipped: unchanged + notFound + skippedNoPrice,
+      });
+
+      setResult({ updated: finalWrites.length, unchanged, notFound, skippedNoPrice, total: rows.length });
+    } catch (err) {
+      setError(err.message || 'Failed to process that file.');
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 space-y-4">
+      <p className="text-sm text-gray-600 max-w-2xl">
+        Upload a price list with a <strong>Part Number</strong> column (optionally <strong>Old Part Number(s)</strong>) and a{' '}
+        <strong>Price</strong> column. Each row is matched to an existing item in the brand selected below by its current or old
+        part number, and only its <strong>Purchase Cost</strong> / <strong>Avg Cost</strong> fields are updated — stock,
+        particulars, rack location and everything else on the item is left exactly as it was. These are the two fields
+        Inventory Valuation reads to compute a value, so this is what fixes a brand showing ₹0.
+      </p>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">Brand *</label>
+        <select value={brand} onChange={(e) => setBrand(e.target.value)} className="w-full sm:w-64 px-3 py-2 border rounded-lg">
+          <option value="">Select brand...</option>
+          {brands.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
+        </select>
+      </div>
+
+      {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
+
+      {result && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded text-sm space-y-1">
+          <p className="font-semibold">Done — {result.updated} item(s) priced.</p>
+          <p>
+            {result.unchanged} already had that price &middot; {result.notFound} part number(s) not found in {brand}
+            {result.skippedNoPrice > 0 && <> &middot; {result.skippedNoPrice} row(s) had no readable price</>}
+          </p>
+        </div>
+      )}
+
+      <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer w-fit ${busy || !brand ? 'bg-gray-300 pointer-events-none' : 'bg-emerald-700 hover:bg-emerald-800'}`}>
+        {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
+        {busy ? 'Applying...' : 'Upload Part Number + Price File'}
+        <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy || !brand} />
       </label>
     </div>
   );
