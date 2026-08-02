@@ -5,7 +5,6 @@ import {
   onSnapshot,
   addDoc,
   doc,
-  updateDoc,
   writeBatch,
   runTransaction,
   serverTimestamp,
@@ -521,10 +520,17 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
         // Upsert: match by Part Number first (new or old), then by exact
         // name within the same brand. Never touches other brands. Existing
         // stock quantities are preserved unless "update stock" is checked.
+        //
+        // Matching is done in plain JS first (no network calls), then every
+        // write goes through chunked writeBatch commits (~400 ops each)
+        // instead of one awaited addDoc/updateDoc per row. For a small
+        // upload this is barely noticeable, but for a large master-catalogue
+        // import (thousands of rows) it's the difference between a few
+        // seconds and sitting through thousands of sequential round trips.
         let nextSno = existingItems.length ? Math.max(...existingItems.map((it) => Number(it.sno) || 0)) + 1 : 1;
-        let added = 0;
-        let updated = 0;
-        let skipped = 0;
+        const matchedOps = []; // { ref, updates }
+        const newItemOps = []; // { itemRef, itemData, txnRef|null, txnData|null, qty }
+
         for (const r of clean) {
           const code = String(r.partCode || '').trim().toLowerCase();
           const oldCode = String(r.oldPartCode || '').trim().toLowerCase();
@@ -548,15 +554,18 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
               updates.currentStock = Number(r.quantity) || 0;
               updates.masterOnly = false;
             }
-            await updateDoc(doc(db, 'items', match.id), updates);
-            updated += 1;
+            matchedOps.push({ ref: doc(db, 'items', match.id), updates });
           } else {
             const qty = Number(r.quantity) || 0;
-            const newRef = await addDoc(collection(db, 'items'), buildItemDoc(r, brand, nextSno, qty));
+            const itemRef = doc(collection(db, 'items'));
+            const itemData = buildItemDoc(r, brand, nextSno, qty);
             nextSno += 1;
+            let txnRef = null;
+            let txnData = null;
             if (qty > 0) {
-              await addDoc(collection(db, 'transactions'), {
-                itemId: newRef.id,
+              txnRef = doc(collection(db, 'transactions'));
+              txnData = {
+                itemId: itemRef.id,
                 itemName: r.particulars,
                 brand,
                 type: 'opening',
@@ -565,13 +574,43 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
                 reason: `Imported from ${sourceLabel}`,
                 performedByEmail: userEmail || '',
                 createdAt: serverTimestamp(),
-              });
-              checkAndSendLowStockAlert(newRef.id);
+              };
             }
-            added += 1;
+            newItemOps.push({ itemRef, itemData, txnRef, txnData, qty });
           }
         }
-        await logImportHistory({ rowsAdded: added, rowsUpdated: updated, rowsSkipped: skipped });
+
+        const CHUNK = 400;
+        for (let i = 0; i < matchedOps.length; i += CHUNK) {
+          const batch = writeBatch(db);
+          matchedOps.slice(i, i + CHUNK).forEach((op) => batch.update(op.ref, op.updates));
+          await batch.commit();
+        }
+        // Each new item may also need a transaction doc, so keep pairs
+        // together and stay under ~400 total writes per batch.
+        let i = 0;
+        while (i < newItemOps.length) {
+          const batch = writeBatch(db);
+          let opsInBatch = 0;
+          while (i < newItemOps.length && opsInBatch < CHUNK - 1) {
+            const op = newItemOps[i];
+            batch.set(op.itemRef, op.itemData);
+            opsInBatch += 1;
+            if (op.txnRef) {
+              batch.set(op.txnRef, op.txnData);
+              opsInBatch += 1;
+            }
+            i += 1;
+          }
+          await batch.commit();
+        }
+        newItemOps.forEach((op) => {
+          if (op.qty > 0) checkAndSendLowStockAlert(op.itemRef.id);
+        });
+
+        const added = newItemOps.length;
+        const updated = matchedOps.length;
+        await logImportHistory({ rowsAdded: added, rowsUpdated: updated, rowsSkipped: 0 });
         setSuccess(`${brand}: added ${added} new part(s), updated ${updated} existing part(s).`);
         setRows([]);
       }
