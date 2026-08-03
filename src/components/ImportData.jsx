@@ -147,11 +147,30 @@ function findBestMatch(name, existingItems, partCode) {
     if (!code) return null;
     const target = String(code).trim().toLowerCase();
     if (!target) return null;
-    return (
-      existingItems.find((it) =>
-        allPartNumbers(it).some((pn) => String(pn).trim().toLowerCase() === target)
-      ) || null
-    );
+    // Stored part numbers are often combined strings like
+    // "40.00.404 / 40.07.493P" — split on "/" so each individual code can
+    // match on its own.
+    const codesOf = (it) =>
+      allPartNumbers(it).flatMap((pn) =>
+        String(pn)
+          .split('/')
+          .map((p) => p.trim().toLowerCase())
+          .filter(Boolean)
+      );
+    // 1) exact match against any individual code fragment
+    let match = existingItems.find((it) => codesOf(it).includes(target));
+    if (match) return match;
+    // 2) partial match — covers suffix differences like "42.00.413" vs
+    // "42.00.413P". Only for reasonably long codes, to avoid false hits.
+    if (target.length >= 5) {
+      match = existingItems.find((it) =>
+        codesOf(it).some(
+          (pn) => pn.length >= 5 && (pn.includes(target) || target.includes(pn))
+        )
+      );
+      if (match) return match;
+    }
+    return null;
   };
   const nameTarget = String(name || '').trim().toLowerCase();
   const codeTarget = String(partCode || '').trim().toLowerCase();
