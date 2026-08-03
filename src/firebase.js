@@ -1,6 +1,10 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import {
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+} from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: "AIzaSyBrHBwVqRx5TNz9nDahQe7wZsFdZFi2gh0",
@@ -13,5 +17,14 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+
+// Persistent local cache: the browser keeps a copy of the catalogue on disk
+// (IndexedDB) and Firestore only downloads documents that changed since the
+// last visit, instead of re-reading all ~7,500 items on every page open.
+// This keeps daily read usage far inside the free (Spark) quota.
+// persistentMultipleTabManager lets several open tabs share one cache safely.
+export const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+});
+
 export default app;
