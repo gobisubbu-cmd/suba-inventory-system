@@ -577,10 +577,7 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
           });
 
           if (match) {
-            const updates = buildItemDoc(r, brand, match.sno, null);
-            delete updates.sno;
-            delete updates.currentStock;
-            delete updates.createdAt;
+            const updates = buildPartialUpdateDoc(r, match);
             if (updateStockOnMatch && r.quantity !== '' && r.quantity !== null && r.quantity !== undefined) {
               updates.currentStock = Number(r.quantity) || 0;
               updates.masterOnly = false;
@@ -870,6 +867,63 @@ function buildItemDoc(r, brand, sno, quantityOrNull) {
     docData.createdAt = serverTimestamp();
   }
   return docData;
+}
+
+// Used when UPDATING an already-matched item (never for brand-new items).
+// A plain buildItemDoc() would overwrite every field with '' / 0 for any
+// column the uploaded file didn't include — on a partial master-list or
+// price-list upload that silently erases real data (storage location,
+// category, supplier, HSN code, reorder level, old-part-number history,
+// etc.) that the file never touched. This only writes a field when the
+// uploaded row actually has a non-empty value for it, and merges (never
+// replaces) old part numbers so a re-import can only ever add cross-
+// references, not delete ones a previous import already recorded.
+function buildPartialUpdateDoc(r, match) {
+  const updates = { updatedAt: serverTimestamp() };
+  const setIfPresent = (key, rawVal, transform = (v) => v) => {
+    if (rawVal === undefined || rawVal === null) return;
+    const s = String(rawVal).trim();
+    if (s === '') return;
+    updates[key] = transform(rawVal);
+  };
+  setIfPresent('particulars', r.particulars, (v) => String(v).trim());
+  setIfPresent('description', r.description, (v) => String(v).trim());
+  if (r.partCode !== undefined && String(r.partCode).trim() !== '') {
+    updates.partNumber = String(r.partCode).trim();
+    updates.partCode = String(r.partCode).trim();
+  }
+  setIfPresent('machineModels', r.machineModels, (v) => String(v).trim());
+  setIfPresent('category', r.category, (v) => String(v).trim());
+  setIfPresent('unit', r.unit, (v) => String(v).trim());
+  setIfPresent('supplier', r.supplier, (v) => String(v).trim());
+  setIfPresent('purchaseCost', r.purchaseCost, (v) => Number(v) || 0);
+  setIfPresent('sellingPrice', r.sellingPrice, (v) => Number(v) || 0);
+  setIfPresent('rackNo', r.rackNo, (v) => String(v).trim());
+  setIfPresent('minStock', r.minStock, (v) => Number(v) || 0);
+  setIfPresent('maxStock', r.maxStock, (v) => Number(v) || 0);
+  setIfPresent('reorderLevel', r.reorderLevel, (v) => Number(v) || 0);
+  setIfPresent('hsnCode', r.hsnCode, (v) => String(v).trim());
+  if ((r.avgCost !== undefined && String(r.avgCost).trim() !== '') || (r.purchaseCost !== undefined && String(r.purchaseCost).trim() !== '')) {
+    updates.avgCost = Number(r.avgCost || r.purchaseCost) || 0;
+  }
+  if (r.notes !== undefined && String(r.notes).trim() !== '') {
+    updates.remarks = String(r.notes).trim();
+  }
+
+  // Old part numbers: merge, never overwrite.
+  const newOld = String(r.oldPartCode || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (newOld.length) {
+    const existingOld = Array.isArray(match.oldPartNumbers) ? match.oldPartNumbers : [];
+    const merged = [...existingOld];
+    newOld.forEach((code) => {
+      if (!merged.some((c) => c.toLowerCase() === code.toLowerCase())) merged.push(code);
+    });
+    updates.oldPartNumbers = merged;
+  }
+  return updates;
 }
 
 function ImportHistoryPanel() {
