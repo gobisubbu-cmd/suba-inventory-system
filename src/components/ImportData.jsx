@@ -975,6 +975,102 @@ function ImportHistoryPanel() {
   );
 }
 
+// Searchable replacement for a plain <select> of hundreds of items.
+// Click to open, type to filter by name / brand / current or old part
+// number, click a row to pick it. Used wherever a scanned/extracted row
+// needs to be matched (or re-matched) to an item without scrolling a
+// giant dropdown — e.g. when handwriting is misread and the auto-match
+// is wrong.
+function SearchableItemSelect({ items, value, onChange }) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef(null);
+
+  const selected = items.find((it) => it.id === value);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClickOutside = (e) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target)) {
+        setOpen(false);
+        setQuery('');
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return items.slice(0, 50);
+    return items
+      .filter((it) => {
+        const hay = [it.particulars, it.brand, it.partNumber, it.partCode, ...(it.oldPartNumbers || [])]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return hay.includes(q);
+      })
+      .slice(0, 50);
+  }, [items, query]);
+
+  return (
+    <div className="relative" ref={wrapperRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={`w-56 px-2 py-1 border rounded text-left truncate bg-white ${!value ? 'border-red-300 text-red-600' : ''}`}
+      >
+        {selected
+          ? `${selected.brand ? `[${selected.brand}] ` : ''}${selected.particulars} (stock: ${selected.currentStock})`
+          : 'No match — select item...'}
+      </button>
+      {open && (
+        <div className="absolute z-20 mt-1 w-96 bg-white border rounded-lg shadow-lg">
+          <input
+            autoFocus
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Type name or part code (old or new) to search..."
+            className="w-full px-2 py-1.5 border-b outline-none text-sm rounded-t-lg"
+          />
+          <div className="max-h-64 overflow-y-auto">
+            <div
+              onClick={() => {
+                onChange('');
+                setOpen(false);
+                setQuery('');
+              }}
+              className="px-2 py-1.5 text-sm text-red-600 hover:bg-red-50 cursor-pointer"
+            >
+              No match — clear selection
+            </div>
+            {filtered.length === 0 && (
+              <div className="px-2 py-1.5 text-sm text-gray-400 italic">No items match "{query}"</div>
+            )}
+            {filtered.map((it) => (
+              <div
+                key={it.id}
+                onClick={() => {
+                  onChange(it.id);
+                  setOpen(false);
+                  setQuery('');
+                }}
+                className={`px-2 py-1.5 text-sm hover:bg-emerald-50 cursor-pointer ${it.id === value ? 'bg-emerald-100' : ''}`}
+              >
+                {it.brand ? `[${it.brand}] ` : ''}
+                {it.particulars}
+                <span className="text-gray-400"> · {it.partNumber || it.partCode || '—'} · stock {it.currentStock}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MovementImport({ existingItems, userEmail }) {
   const [movementType, setMovementType] = useState('purchase');
   const [rows, setRows] = useState([]);
@@ -1019,6 +1115,7 @@ function MovementImport({ existingItems, userEmail }) {
           quantity: r.quantity ?? '',
           unitCost: r.avgCost ?? '',
           itemId: match ? match.id : '',
+          remarks: '',
         };
       });
       setRows(withMatches);
@@ -1116,6 +1213,8 @@ function MovementImport({ existingItems, userEmail }) {
               quantity: qty,
               unitCost: r.unitCost ? Number(r.unitCost) : null,
               reason: reason.trim() || `Imported from ${sourceLabel}`,
+              remarks: r.remarks?.trim() || '',
+              extractedName: r.particulars || '',
               performedByEmail: userEmail || '',
               createdAt: serverTimestamp(),
             });
@@ -1279,6 +1378,7 @@ function MovementImport({ existingItems, userEmail }) {
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Quantity</th>
                 {showUnitCost && <th className="text-left px-3 py-2 font-semibold text-gray-600">Unit Cost</th>}
                 {isReceiving && <th className="text-left px-3 py-2 font-semibold text-gray-600">Existing Stock Locations</th>}
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Remarks</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -1287,18 +1387,21 @@ function MovementImport({ existingItems, userEmail }) {
                 const existingLocs = existingLocationsByItem[r.itemId] || [];
                 return (
                 <tr key={idx} className="border-b last:border-0">
-                  <td className="px-2 py-1 text-gray-600">{r.particulars}</td>
                   <td className="px-2 py-1">
-                    <select
+                    <input
+                      type="text"
+                      value={r.particulars}
+                      onChange={(e) => updateRow(idx, 'particulars', e.target.value)}
+                      className="w-40 px-2 py-1 border rounded text-gray-700"
+                      title="Correct this if the scan misread the code/name (e.g. bad handwriting)"
+                    />
+                  </td>
+                  <td className="px-2 py-1">
+                    <SearchableItemSelect
+                      items={itemOptions}
                       value={r.itemId}
-                      onChange={(e) => updateRow(idx, 'itemId', e.target.value)}
-                      className={`w-56 px-2 py-1 border rounded ${!r.itemId ? 'border-red-300 text-red-600' : ''}`}
-                    >
-                      <option value="">No match — select item...</option>
-                      {itemOptions.map((it) => (
-                        <option key={it.id} value={it.id}>{it.brand ? `[${it.brand}] ` : ''}{it.particulars} (stock: {it.currentStock})</option>
-                      ))}
-                    </select>
+                      onChange={(id) => updateRow(idx, 'itemId', id)}
+                    />
                   </td>
                   <td className="px-2 py-1">
                     <input
@@ -1334,6 +1437,15 @@ function MovementImport({ existingItems, userEmail }) {
                       )}
                     </td>
                   )}
+                  <td className="px-2 py-1">
+                    <input
+                      type="text"
+                      value={r.remarks}
+                      onChange={(e) => updateRow(idx, 'remarks', e.target.value)}
+                      placeholder="e.g. handwriting mismatch, corrected code"
+                      className="w-48 px-2 py-1 border rounded text-xs"
+                    />
+                  </td>
                   <td className="px-2 py-1">
                     <button onClick={() => removeRow(idx)} className="text-red-500 hover:text-red-700" title="Remove row">
                       <Trash2 size={16} />
