@@ -25,6 +25,9 @@ import LocationMaster from './components/LocationMaster';
 import PutawayAlertPopup from './components/PutawayAlertPopup';
 import Brands from './components/Brands';
 import EngineerIssueReturn from './components/EngineerIssueReturn';
+import FieldMode from './components/FieldMode';
+import MobileQuickScan from './components/MobileQuickScan';
+import MobileEngineerIssue from './components/MobileEngineerIssue';
 // import { runDailyBackupIfNeeded } from './backup'; // see note below — temporarily disabled
 import './index.css';
 
@@ -111,6 +114,40 @@ export default function App() {
     setDashboardBrandFilter(`${brand}::${Date.now()}`);
     setCurrentView('dashboard');
   };
+
+  // Field Mode and its two sub-screens are a deliberately separate,
+  // full-screen mobile experience — no desktop sidebar, no p-6 desktop
+  // padding, no floating "Dashboard" button (each screen has its own
+  // back/exit control). Handled before the normal Navigation+main shell
+  // below rather than inside renderView, since they replace that whole
+  // shell rather than filling the <main> slot within it.
+  if (currentView === 'field') {
+    return (
+      <FieldMode
+        userRole={userRole}
+        onOpenScan={() => setCurrentView('mobileScan')}
+        onOpenEngineer={() => setCurrentView('mobileEngineer')}
+        onExit={() => setCurrentView('dashboard')}
+      />
+    );
+  }
+  if (currentView === 'mobileScan') {
+    return (
+      <MobileQuickScan
+        userRole={userRole}
+        userEmail={user.email}
+        onExit={() => setCurrentView('field')}
+      />
+    );
+  }
+  if (currentView === 'mobileEngineer') {
+    return (
+      <MobileEngineerIssue
+        userEmail={user.email}
+        onExit={() => setCurrentView('field')}
+      />
+    );
+  }
 
   const renderView = () => {
     switch (currentView) {

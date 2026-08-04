@@ -1,7 +1,7 @@
 import React from 'react';
 import { signOut } from 'firebase/auth';
 import { auth } from '../firebase';
-import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat } from 'lucide-react';
+import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat, Smartphone } from 'lucide-react';
 
 const ROLE_LABELS = {
   staff: 'STAFF',
@@ -43,6 +43,14 @@ export default function Navigation({ currentView, onViewChange, userRole, userNa
       </div>
 
       <nav className="flex-1 overflow-y-auto p-4 space-y-2">
+        <button
+          onClick={() => onViewChange('field')}
+          title="Phone-friendly Quick Scan, Engineer Issue/Return, and stock lookup"
+          className="w-full flex items-center gap-3 px-4 py-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-emerald-950 font-semibold transition mb-2"
+        >
+          <Smartphone size={20} />
+          <span>Field Mode</span>
+        </button>
         {menuItems.map((item) => {
           if (!item.show) return null;
           const Icon = item.icon;
