@@ -1,5 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
+import { getStorage } from 'firebase/storage';
 import {
   initializeFirestore,
   persistentLocalCache,
@@ -26,5 +27,10 @@ export const auth = getAuth(app);
 export const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
 });
+
+// Used once a day for the automatic stock safety-backup — a JSON snapshot of
+// the whole catalogue is written here, completely separate from the live
+// "items" collection, so a bad import/bug in the app can never touch it.
+export const storage = getStorage(app);
 
 export default app;

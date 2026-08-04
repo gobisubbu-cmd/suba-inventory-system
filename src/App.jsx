@@ -25,6 +25,7 @@ import LocationMaster from './components/LocationMaster';
 import PutawayAlertPopup from './components/PutawayAlertPopup';
 import Brands from './components/Brands';
 import EngineerIssueReturn from './components/EngineerIssueReturn';
+import { runDailyBackupIfNeeded } from './backup';
 import './index.css';
 
 export default function App() {
@@ -57,6 +58,15 @@ export default function App() {
 
     return unsubscribe;
   }, []);
+
+  // Once a day, whoever opens the app first triggers a safety backup of the
+  // whole stock catalogue (see src/backup.js for what/why). Runs quietly in
+  // the background — never blocks the app, never shows an error to staff.
+  useEffect(() => {
+    if (user) {
+      runDailyBackupIfNeeded();
+    }
+  }, [user]);
 
   if (loading) {
     return (
