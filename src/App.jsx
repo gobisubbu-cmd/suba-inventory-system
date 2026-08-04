@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Home } from 'lucide-react';
 import { auth, db } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
@@ -72,6 +73,19 @@ export default function App() {
     return <Login />;
   }
 
+  // Every page renders inside <main> below; this one button gives every
+  // page — without touching each one individually — a way to bail out of
+  // whatever's on screen (an unfinished import, a half-filled form, etc.)
+  // and land back on the Dashboard. Switching currentView unmounts the
+  // current page's component, which discards its local unsaved state, so
+  // this doubles as "cancel" and "back to dashboard" in one click.
+  const goToDashboard = () => {
+    if (currentView === 'dashboard') return;
+    if (window.confirm('Cancel what you\'re doing on this page and go back to the Dashboard? Anything not yet saved will be lost.')) {
+      setCurrentView('dashboard');
+    }
+  };
+
   const renderView = () => {
     switch (currentView) {
       case 'dashboard':
@@ -125,7 +139,17 @@ export default function App() {
         userRole={userRole}
         userName={user.email}
       />
-      <main className="flex-1 overflow-auto">
+      <main className="flex-1 overflow-auto relative">
+        {currentView !== 'dashboard' && (
+          <button
+            onClick={goToDashboard}
+            title="Cancel and back to Dashboard"
+            className="fixed top-4 right-6 z-40 flex items-center gap-2 bg-white shadow-lg border border-gray-200 hover:bg-red-50 hover:border-red-300 hover:text-red-600 text-gray-600 pl-3 pr-4 py-2 rounded-full transition"
+          >
+            <Home size={18} />
+            <span className="text-sm font-medium">Dashboard</span>
+          </button>
+        )}
         <div className="p-6">{renderView()}</div>
       </main>
       <PutawayAlertPopup userRole={userRole} onViewReport={() => setCurrentView('warehouse')} />
