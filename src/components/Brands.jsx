@@ -4,7 +4,7 @@ import { collection, onSnapshot, addDoc, query, orderBy, serverTimestamp } from 
 import { Tag, Plus } from 'lucide-react';
 import { computeStockStatus } from '../lib/brands';
 
-export default function Brands({ userRole }) {
+export default function Brands({ userRole, onSelectBrand }) {
   const [brands, setBrands] = useState([]);
   const [items, setItems] = useState([]);
   const [newBrand, setNewBrand] = useState('');
@@ -101,7 +101,15 @@ export default function Brands({ userRole }) {
               const s = stats[b.name] || { total: 0, stocked: 0, notStocked: 0, value: 0 };
               return (
                 <tr key={b.id} className="border-b last:border-0 hover:bg-gray-50">
-                  <td className="px-4 py-3 font-semibold text-emerald-700">{b.name}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => onSelectBrand && onSelectBrand(b.name)}
+                      className="font-semibold text-emerald-700 hover:text-emerald-900 hover:underline"
+                      title={`View ${b.name} stock`}
+                    >
+                      {b.name}
+                    </button>
+                  </td>
                   <td className="px-4 py-3 text-right">{s.total}</td>
                   <td className="px-4 py-3 text-right">{s.stocked}</td>
                   <td className="px-4 py-3 text-right">{s.notStocked}</td>

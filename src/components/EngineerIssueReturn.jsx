@@ -181,6 +181,11 @@ function IssueForm({ items, userEmail, disabled }) {
             engineer: engineerName,
             serviceJobNo,
             performedByEmail: userEmail || '',
+            // Effective date of the movement, as entered on the form — kept
+            // separate from createdAt (system upload time) per the
+            // date-based stock rule: reports must key off when it actually
+            // happened, not when it was typed in.
+            transactionDate: date,
             createdAt: serverTimestamp(),
           });
           lineRecords.push({
@@ -292,6 +297,7 @@ function ReturnForm({ items, issues, userEmail, disabled }) {
             engineer: engineerName,
             serviceJobNo,
             performedByEmail: userEmail || '',
+            transactionDate: returnDate,
             createdAt: serverTimestamp(),
           });
           lineRecords.push({
@@ -369,6 +375,7 @@ function UsedForm({ items, userEmail, disabled }) {
   const [customerName, setCustomerName] = useState('');
   const [machineModel, setMachineModel] = useState('');
   const [serialNumber, setSerialNumber] = useState('');
+  const [serviceDate, setServiceDate] = useState(new Date().toISOString().slice(0, 10));
   const [lines, setLines] = useState([{ ...blankLine(), warrantyOrChargeable: 'Chargeable', remarks: '' }]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -415,6 +422,7 @@ function UsedForm({ items, userEmail, disabled }) {
           reason: `Consumed at ${customerName || 'customer site'} — job ${serviceJobNo} (${lr.warrantyOrChargeable})`,
           serviceJobNo,
           performedByEmail: userEmail || '',
+          transactionDate: serviceDate,
           createdAt: serverTimestamp(),
         });
       }
@@ -423,6 +431,7 @@ function UsedForm({ items, userEmail, disabled }) {
         customerName: customerName.trim(),
         machineModel: machineModel.trim(),
         serialNumber: serialNumber.trim(),
+        serviceDate,
         items: lineRecords,
         createdByEmail: userEmail || '',
         createdAt: serverTimestamp(),
@@ -432,6 +441,7 @@ function UsedForm({ items, userEmail, disabled }) {
       setCustomerName('');
       setMachineModel('');
       setSerialNumber('');
+      setServiceDate(new Date().toISOString().slice(0, 10));
       setLines([{ ...blankLine(), warrantyOrChargeable: 'Chargeable', remarks: '' }]);
     } catch (err) {
       setError(err.message);
@@ -453,6 +463,8 @@ function UsedForm({ items, userEmail, disabled }) {
           <input value={machineModel} onChange={(e) => setMachineModel(e.target.value)} className="w-full px-3 py-2 border rounded-lg" /></div>
         <div><label className="block text-sm font-medium text-gray-700 mb-1">Serial Number</label>
           <input value={serialNumber} onChange={(e) => setSerialNumber(e.target.value)} className="w-full px-3 py-2 border rounded-lg" /></div>
+        <div><label className="block text-sm font-medium text-gray-700 mb-1">Service Date</label>
+          <input type="date" value={serviceDate} onChange={(e) => setServiceDate(e.target.value)} className="w-full px-3 py-2 border rounded-lg" /></div>
       </div>
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">Spare Parts Used</label>

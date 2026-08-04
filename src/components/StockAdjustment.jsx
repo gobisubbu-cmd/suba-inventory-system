@@ -10,6 +10,7 @@ export default function StockAdjustment({ userRole, userEmail }) {
   const [direction, setDirection] = useState('increase');
   const [quantity, setQuantity] = useState('');
   const [reason, setReason] = useState('');
+  const [transactionDate, setTransactionDate] = useState(new Date().toISOString().slice(0, 10));
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [saving, setSaving] = useState(false);
@@ -73,6 +74,7 @@ export default function StockAdjustment({ userRole, userEmail }) {
           quantity: qty,
           reason: reason.trim(),
           performedByEmail: userEmail || '',
+          transactionDate,
           createdAt: serverTimestamp(),
         });
       });
@@ -80,6 +82,7 @@ export default function StockAdjustment({ userRole, userEmail }) {
       setSuccess('Stock adjustment recorded.');
       setQuantity('');
       setReason('');
+      setTransactionDate(new Date().toISOString().slice(0, 10));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -144,6 +147,19 @@ export default function StockAdjustment({ userRole, userEmail }) {
               className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
               required
             />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Transaction Date</label>
+            <input
+              type="date"
+              value={transactionDate}
+              onChange={(e) => setTransactionDate(e.target.value)}
+              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+              required
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              The date this correction actually applies to — not necessarily today. Reports and stock ledgers use this date.
+            </p>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Reason *</label>

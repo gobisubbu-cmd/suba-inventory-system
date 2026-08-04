@@ -57,7 +57,14 @@ export default function Overview({ userRole, onViewChange }) {
       if (status === 'Out of Stock') { outOfStock += 1; pendingReorder += 1; }
       if (status === 'Not Stocked') notStocked += 1;
       const b = it.brand || 'Unassigned';
-      byBrand[b] = (byBrand[b] || 0) + 1;
+      // Brand-wise Stock badges should read as "what do we actually have",
+      // not the full catalogue count — a brand with a large master
+      // catalogue (parts never received) would otherwise show a number far
+      // bigger than what's physically on the shelf. Matches the "Physically
+      // Stocked" column on the Brands page.
+      if (status !== 'Not Stocked') {
+        byBrand[b] = (byBrand[b] || 0) + 1;
+      }
     });
     return { totalValue, lowStock, outOfStock, notStocked, pendingReorder, total: items.length, byBrand };
   }, [items]);
@@ -173,7 +180,9 @@ function RecentActivity({ title, icon: Icon, tone, txns }) {
               <div className="flex items-center gap-2 text-gray-500">
                 <span>{t.quantity}</span>
                 <Clock size={12} />
-                <span className="text-xs">{t.createdAt?.toDate ? t.createdAt.toDate().toLocaleDateString() : ''}</span>
+                <span className="text-xs">
+                  {t.transactionDate || (t.createdAt?.toDate ? t.createdAt.toDate().toLocaleDateString() : '')}
+                </span>
               </div>
             </li>
           ))}

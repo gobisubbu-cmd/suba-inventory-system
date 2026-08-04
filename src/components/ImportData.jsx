@@ -926,6 +926,29 @@ function buildPartialUpdateDoc(r, match) {
   return updates;
 }
 
+// Best-effort parse of a document date (from AI scan or a spreadsheet cell —
+// could be "10/07/2026", "2026-07-10", "10-Jul-2026", etc.) into the
+// yyyy-mm-dd shape <input type="date"> needs. Returns null rather than
+// guessing wrong, so the field just falls back to defaulting to today.
+function normalizeDateForInput(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const dmy = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (dmy) {
+    let [, d, m, y] = dmy;
+    if (y.length === 2) y = `20${y}`;
+    d = d.padStart(2, '0');
+    m = m.padStart(2, '0');
+    if (Number(m) <= 12 && Number(d) <= 31) return `${y}-${m}-${d}`;
+  }
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime()) && parsed.getFullYear() > 2000) {
+    return parsed.toISOString().slice(0, 10);
+  }
+  return null;
+}
+
 function ImportHistoryPanel() {
   const [history, setHistory] = useState([]);
   useEffect(() => {
@@ -1082,6 +1105,11 @@ function MovementImport({ existingItems, userEmail }) {
   const [sourceLabel, setSourceLabel] = useState('');
   const [existingLocationsByItem, setExistingLocationsByItem] = useState({});
   const [detectedMeta, setDetectedMeta] = useState(null);
+  // Effective date of the movement — auto-filled from the document's own
+  // date when the scan/parse detects one, editable either way. Kept
+  // separate from createdAt (upload time) so a document entered late still
+  // posts, reports and audits against the date printed on it, not today.
+  const [transactionDate, setTransactionDate] = useState(new Date().toISOString().slice(0, 10));
   const fileInputRef = useRef(null);
 
   const movement = MOVEMENT_TYPES.find((m) => m.id === movementType);
@@ -1130,6 +1158,10 @@ function MovementImport({ existingItems, userEmail }) {
       }
       if (meta?.partyName) {
         setSupplier(meta.partyName);
+      }
+      const parsedDate = normalizeDateForInput(meta?.documentDate);
+      if (parsedDate) {
+        setTransactionDate(parsedDate);
       }
       if (isReceiving) {
         const entries = await Promise.all(
@@ -1217,6 +1249,7 @@ function MovementImport({ existingItems, userEmail }) {
               extractedName: r.particulars || '',
               ...(isReceiving ? { supplier: supplier.trim() } : { customerName: supplier.trim() }),
               performedByEmail: userEmail || '',
+              transactionDate,
               createdAt: serverTimestamp(),
             });
             committedItemName = itemSnap.data().particulars;
@@ -1231,7 +1264,7 @@ function MovementImport({ existingItems, userEmail }) {
               itemCode: committedItemCode,
               quantity: qty,
               invoiceNumber: reason.trim() || sourceLabel || 'N/A',
-              invoiceDate: new Date().toISOString().slice(0, 10),
+              invoiceDate: transactionDate,
               supplier: supplier.trim(),
               transactionId: committedTxnId,
               userEmail,
@@ -1318,6 +1351,18 @@ function MovementImport({ existingItems, userEmail }) {
                 onChange={(e) => setReason(e.target.value)}
                 className="w-full max-w-md px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
                 placeholder="Invoice no., customer, notes..."
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Transaction Date
+              </label>
+              <input
+                type="date"
+                value={transactionDate}
+                onChange={(e) => setTransactionDate(e.target.value)}
+                className="px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                title="The date on the document itself — auto-filled from the scan when detected. Reports and stock ledgers use this date, not today's upload date."
               />
             </div>
             <div>

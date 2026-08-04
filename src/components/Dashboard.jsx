@@ -10,7 +10,7 @@ const PAGE_SIZE = 100;
 // the items it matches. Stats, brand breakdown, put-away alerts and recent
 // activity have moved to the Overview page; low/out-of-stock items needing
 // reorder have moved to the Reorder Items page (see Navigation.jsx).
-export default function Dashboard({ userRole, userEmail }) {
+export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
   const [items, setItems] = useState([]);
   const [search, setSearch] = useState('');
   const [brandFilter, setBrandFilter] = useState('All');
@@ -24,6 +24,15 @@ export default function Dashboard({ userRole, userEmail }) {
     });
     return unsub;
   }, []);
+
+  // Arriving here from the Brands page (click a brand name) or Overview's
+  // "Brand-wise Stock" badges pre-filters the table to that brand. Depends
+  // on initialBrandFilter's identity changing each time (App.jsx bumps a
+  // counter alongside it) so re-clicking the same brand re-applies the filter
+  // even if the user had since changed it manually.
+  useEffect(() => {
+    if (initialBrandFilter) setBrandFilter(initialBrandFilter.split('::')[0]);
+  }, [initialBrandFilter]);
 
   const brandOptions = useMemo(() => {
     const set = new Set(items.map((it) => it.brand || 'Unassigned'));

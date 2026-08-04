@@ -12,6 +12,19 @@ function toDate(ts) {
   return new Date(ts);
 }
 
+// Inventory Date-Based Stock Adjustment Rule: every report/ledger must key
+// off the date the movement actually happened (transactionDate, entered on
+// the form or read off the scanned document), not createdAt (when it was
+// typed into the system). Older records written before this field existed
+// fall back to createdAt so nothing in history breaks.
+function effectiveDate(t) {
+  if (t.transactionDate) {
+    const d = new Date(`${t.transactionDate}T00:00:00`);
+    if (!isNaN(d.getTime())) return d;
+  }
+  return toDate(t.createdAt);
+}
+
 function download(filename, rows) {
   // json_to_sheet([]) produces a totally blank sheet with no header row at
   // all, which looks exactly like a broken/failed export. Make a genuinely
@@ -87,11 +100,16 @@ export default function Reports({ userRole }) {
   const canSeeValue = userRole === 'admin' || userRole === 'inventory_manager';
 
   const filteredTxns = useMemo(() => {
-    if (!startDate && !endDate) return transactions;
+    // Sort by the real transaction date first (falling back to upload time
+    // for old records), so a document entered late still lands in correct
+    // chronological order rather than at the top just because it was
+    // uploaded most recently.
+    const sorted = [...transactions].sort((a, b) => (effectiveDate(b)?.getTime() || 0) - (effectiveDate(a)?.getTime() || 0));
+    if (!startDate && !endDate) return sorted;
     const start = startDate ? new Date(startDate) : null;
     const end = endDate ? new Date(endDate + 'T23:59:59') : null;
-    return transactions.filter((t) => {
-      const d = toDate(t.createdAt);
+    return sorted.filter((t) => {
+      const d = effectiveDate(t);
       if (!d) return false;
       if (start && d < start) return false;
       if (end && d > end) return false;
@@ -151,7 +169,8 @@ export default function Reports({ userRole }) {
     const rows = filteredTxns
       .filter((t) => !filterType || t.type === filterType)
       .map((t) => ({
-        Date: toDate(t.createdAt)?.toLocaleString() || '',
+        'Transaction Date': t.transactionDate || effectiveDate(t)?.toLocaleDateString() || '',
+        'Uploaded On': toDate(t.createdAt)?.toLocaleString() || '',
         Item: t.itemName,
         Type: t.type,
         Direction: t.direction,
@@ -340,7 +359,7 @@ export default function Reports({ userRole }) {
     const lastOut = {};
     transactions.forEach((t) => {
       if (t.direction !== 'out') return;
-      const d = toDate(t.createdAt);
+      const d = effectiveDate(t);
       if (!d) return;
       freq[t.itemId] = freq[t.itemId] || { last90: 0, lastMovement: 0 };
       if (d.getTime() >= days90) freq[t.itemId].last90 += 1;
@@ -539,7 +558,7 @@ export default function Reports({ userRole }) {
   const exportMonthlyConsumption = () => {
     const byMonth = {};
     sparePartsUsed.forEach((doc) => {
-      const d = toDate(doc.createdAt);
+      const d = doc.serviceDate ? new Date(`${doc.serviceDate}T00:00:00`) : toDate(doc.createdAt);
       const key = d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` : 'unknown';
       (doc.items || []).forEach((it) => {
         byMonth[key] = (byMonth[key] || 0) + Number(it.qtyUsed || 0);
@@ -552,7 +571,8 @@ export default function Reports({ userRole }) {
     const rows = transactions
       .filter((t) => ['engineerIssue', 'engineerReturn', 'consumption'].includes(t.type))
       .map((t) => ({
-        'Date & Time': toDate(t.createdAt)?.toLocaleString() || '',
+        'Transaction Date': t.transactionDate || effectiveDate(t)?.toLocaleDateString() || '',
+        'Uploaded On': toDate(t.createdAt)?.toLocaleString() || '',
         User: t.performedByEmail,
         Engineer: t.engineer || '',
         'Transaction Type': t.type,
@@ -644,6 +664,11 @@ export default function Reports({ userRole }) {
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
         <h2 className="font-semibold text-gray-800">Date-Range Movement Report</h2>
+        <p className="text-xs text-gray-400">
+          Filters and sorts by each movement's actual <strong>Transaction Date</strong> — not when it was uploaded —
+          so a document entered late still lands in the correct period. "Uploaded On" is kept alongside it as the
+          audit-trail record of when it was actually typed into the system.
+        </p>
         <div className="flex flex-wrap items-end gap-3">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
@@ -660,7 +685,8 @@ export default function Reports({ userRole }) {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Date</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Transaction Date</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Uploaded On</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Item</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Type</th>
                 <th className="text-right px-3 py-2 font-semibold text-gray-600">Qty</th>
@@ -671,7 +697,8 @@ export default function Reports({ userRole }) {
             <tbody>
               {filteredTxns.slice(0, 50).map((t) => (
                 <tr key={t.id} className="border-b last:border-0">
-                  <td className="px-3 py-2">{toDate(t.createdAt)?.toLocaleString() || ''}</td>
+                  <td className="px-3 py-2">{t.transactionDate || effectiveDate(t)?.toLocaleDateString() || ''}</td>
+                  <td className="px-3 py-2 text-gray-400">{toDate(t.createdAt)?.toLocaleString() || ''}</td>
                   <td className="px-3 py-2">{t.itemName}</td>
                   <td className="px-3 py-2 capitalize">{t.type} ({t.direction})</td>
                   <td className="px-3 py-2 text-right">{t.quantity}</td>
@@ -681,7 +708,7 @@ export default function Reports({ userRole }) {
               ))}
               {filteredTxns.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-8 text-center text-gray-400">No transactions in range.</td>
+                  <td colSpan={7} className="px-3 py-8 text-center text-gray-400">No transactions in range.</td>
                 </tr>
               )}
             </tbody>

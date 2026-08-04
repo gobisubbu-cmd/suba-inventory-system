@@ -33,6 +33,10 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [currentView, setCurrentView] = useState('dashboard');
   const [userRole, setUserRole] = useState(null);
+  // Set when a brand name is clicked on the Brands page — carries a
+  // "brand::timestamp" token so Dashboard's effect fires even if the same
+  // brand is clicked twice in a row. See goToDashboardFiltered below.
+  const [dashboardBrandFilter, setDashboardBrandFilter] = useState(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -100,16 +104,24 @@ export default function App() {
     }
   };
 
+  // Clicking a brand name on the Brands page jumps straight to the
+  // Dashboard, pre-filtered to that brand's stock — no confirm prompt since
+  // nothing on the Brands page can be "unsaved".
+  const goToDashboardFiltered = (brand) => {
+    setDashboardBrandFilter(`${brand}::${Date.now()}`);
+    setCurrentView('dashboard');
+  };
+
   const renderView = () => {
     switch (currentView) {
       case 'dashboard':
-        return <Dashboard userRole={userRole} userEmail={user.email} />;
+        return <Dashboard userRole={userRole} userEmail={user.email} initialBrandFilter={dashboardBrandFilter} />;
       case 'overview':
         return <Overview userRole={userRole} onViewChange={setCurrentView} />;
       case 'reorder':
         return <ReorderItems userRole={userRole} />;
       case 'brands':
-        return <Brands userRole={userRole} />;
+        return <Brands userRole={userRole} onSelectBrand={goToDashboardFiltered} />;
       case 'items':
         return <ManageItems userRole={userRole} />;
       case 'engineers':
