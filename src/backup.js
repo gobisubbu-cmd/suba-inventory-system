@@ -76,18 +76,27 @@ async function sendBackupEmail({ date, itemCount, totalStockValue, brandCounts }
 export async function runDailyBackupIfNeeded() {
   const today = todayStr();
   if (typeof window === 'undefined') return;
-  if (window.localStorage.getItem(LOCAL_KEY) === today) return;
+  window.__backupDebug = { status: 'starting', today };
+  if (window.localStorage.getItem(LOCAL_KEY) === today) {
+    window.__backupDebug.status = 'skipped-localstorage';
+    return;
+  }
 
   try {
+    window.__backupDebug.status = 'checking-status-doc';
     const statusRef = doc(db, 'systemMeta', 'backupStatus');
     const statusSnap = await getDoc(statusRef);
     if (statusSnap.exists() && statusSnap.data().lastBackupDate === today) {
       window.localStorage.setItem(LOCAL_KEY, today);
+      window.__backupDebug.status = 'skipped-already-done-today';
       return;
     }
+    window.__backupDebug.status = 'fetching-items';
 
     const itemsSnap = await getDocs(collection(db, 'items'));
     const items = itemsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    window.__backupDebug.status = 'writing-chunks';
+    window.__backupDebug.itemCount = items.length;
 
     let totalStockValue = 0;
     const brandCounts = {};
@@ -136,10 +145,15 @@ export async function runDailyBackupIfNeeded() {
     );
 
     window.localStorage.setItem(LOCAL_KEY, today);
+    window.__backupDebug.status = 'success';
 
     await sendBackupEmail({ date: today, itemCount: items.length, totalStockValue, brandCounts });
   } catch (err) {
     // A failed backup must never block the app from loading for everyday use.
+    window.__backupDebug.status = 'error';
+    window.__backupDebug.errorMessage = err && err.message;
+    window.__backupDebug.errorCode = err && err.code;
+    window.__backupDebug.errorStack = err && err.stack;
     console.error('Daily stock backup failed:', err);
   }
 }
