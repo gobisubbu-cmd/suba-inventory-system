@@ -1215,6 +1215,7 @@ function MovementImport({ existingItems, userEmail }) {
               reason: reason.trim() || `Imported from ${sourceLabel}`,
               remarks: r.remarks?.trim() || '',
               extractedName: r.particulars || '',
+              ...(isReceiving ? { supplier: supplier.trim() } : { customerName: supplier.trim() }),
               performedByEmail: userEmail || '',
               createdAt: serverTimestamp(),
             });
@@ -1319,18 +1320,23 @@ function MovementImport({ existingItems, userEmail }) {
                 placeholder="Invoice no., customer, notes..."
               />
             </div>
-            {isReceiving && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
-                <input
-                  type="text"
-                  value={supplier}
-                  onChange={(e) => setSupplier(e.target.value)}
-                  className="w-full max-w-md px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
-                  placeholder="Supplier name"
-                />
-              </div>
-            )}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                {isReceiving ? 'Supplier' : 'Customer'}
+              </label>
+              <input
+                type="text"
+                value={supplier}
+                onChange={(e) => setSupplier(e.target.value)}
+                className="w-full max-w-md px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                placeholder={isReceiving ? 'Supplier name' : 'Customer name'}
+                title={
+                  isReceiving
+                    ? 'Correct this if the scan misread the supplier name'
+                    : 'Correct this if the scan misread the customer name (e.g. bad handwriting on the chit)'
+                }
+              />
+            </div>
           </div>
         )}
         {isReceiving && rows.length > 0 && (
