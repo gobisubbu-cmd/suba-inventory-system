@@ -25,7 +25,7 @@ import LocationMaster from './components/LocationMaster';
 import PutawayAlertPopup from './components/PutawayAlertPopup';
 import Brands from './components/Brands';
 import EngineerIssueReturn from './components/EngineerIssueReturn';
-import { runDailyBackupIfNeeded } from './backup';
+// import { runDailyBackupIfNeeded } from './backup'; // see note below — temporarily disabled
 import './index.css';
 
 export default function App() {
@@ -59,14 +59,18 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // Once a day, whoever opens the app first triggers a safety backup of the
-  // whole stock catalogue (see src/backup.js for what/why). Runs quietly in
-  // the background — never blocks the app, never shows an error to staff.
-  useEffect(() => {
-    if (user) {
-      runDailyBackupIfNeeded();
-    }
-  }, [user]);
+  // Daily stock safety-backup — TEMPORARILY DISABLED.
+  // The write step (src/backup.js) was hanging indefinitely during testing
+  // (batch.commit() never resolved or rejected) for a reason not yet fully
+  // root-caused. It's non-blocking and wrapped defensively, so leaving it on
+  // would not break the app for normal use, but "silently never backs up"
+  // isn't good enough for a safety feature — re-enable only after this is
+  // understood and verified working end-to-end.
+  // useEffect(() => {
+  //   if (user) {
+  //     runDailyBackupIfNeeded();
+  //   }
+  // }, [user]);
 
   if (loading) {
     return (
