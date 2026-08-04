@@ -115,13 +115,21 @@ export async function runDailyBackupIfNeeded() {
     for (let i = 0; i < items.length; i += ITEMS_PER_CHUNK) {
       chunks.push(items.slice(i, i + ITEMS_PER_CHUNK));
     }
+    window.__backupDebug.chunkCount = chunks.length;
+    window.__backupDebug.batchesDone = 0;
     for (let i = 0; i < chunks.length; i += CHUNK_DOCS_PER_BATCH) {
+      window.__backupDebug.status = `writing-batch-starting-at-${i}`;
       const batch = writeBatch(db);
       chunks.slice(i, i + CHUNK_DOCS_PER_BATCH).forEach((chunkItems, offset) => {
         const chunkRef = doc(db, 'dailyBackups', today, 'chunks', String(i + offset));
         batch.set(chunkRef, { items: chunkItems });
       });
-      await batch.commit();
+      const commitPromise = batch.commit();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`commit timed out after 15s at batch starting ${i}`)), 15000)
+      );
+      await Promise.race([commitPromise, timeoutPromise]);
+      window.__backupDebug.batchesDone += 1;
     }
 
     await setDoc(doc(db, 'dailyBackups', today), {
