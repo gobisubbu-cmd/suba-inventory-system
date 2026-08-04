@@ -117,7 +117,7 @@ export default function App() {
       case 'dashboard':
         return <Dashboard userRole={userRole} userEmail={user.email} initialBrandFilter={dashboardBrandFilter} />;
       case 'overview':
-        return <Overview userRole={userRole} onViewChange={setCurrentView} />;
+        return <Overview userRole={userRole} onViewChange={setCurrentView} onSelectBrand={goToDashboardFiltered} />;
       case 'reorder':
         return <ReorderItems userRole={userRole} />;
       case 'brands':

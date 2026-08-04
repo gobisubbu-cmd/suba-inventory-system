@@ -9,10 +9,9 @@ import { computeStockStatus } from '../lib/brands';
 // summary stats, brand-wise breakdown, warehouse put-away alerts and recent
 // activity. Low/out-of-stock items needing reorder now have their own page
 // (see ReorderItems.jsx / Navigation "Reorder Items").
-export default function Overview({ userRole, onViewChange }) {
+export default function Overview({ userRole, onViewChange, onSelectBrand }) {
   const [items, setItems] = useState([]);
   const [transactions, setTransactions] = useState([]);
-  const [brandFilter, setBrandFilter] = useState('All');
   const [putawayStats, setPutawayStats] = useState(null);
   const canSeeValue = userRole === 'admin' || userRole === 'inventory_manager';
 
@@ -93,12 +92,14 @@ export default function Overview({ userRole, onViewChange }) {
 
       <div className="bg-white rounded-lg shadow p-4">
         <h2 className="font-semibold text-gray-700 mb-3 flex items-center gap-2"><Layers size={16} /> Brand-wise Stock</h2>
+        <p className="text-xs text-gray-400 -mt-2 mb-3">Click a brand to see its stock on the Dashboard.</p>
         <div className="flex flex-wrap gap-2">
           {Object.entries(summary.byBrand).sort().map(([brand, count]) => (
             <button
               key={brand}
-              onClick={() => setBrandFilter(brandFilter === brand ? 'All' : brand)}
-              className={`px-3 py-2 rounded-lg border text-sm ${brandFilter === brand ? 'bg-emerald-700 text-white border-emerald-700' : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'}`}
+              onClick={() => onSelectBrand && onSelectBrand(brand)}
+              title={`View ${brand} stock`}
+              className="px-3 py-2 rounded-lg border text-sm bg-gray-50 border-gray-200 text-gray-700 hover:bg-emerald-50 hover:border-emerald-300 hover:text-emerald-800 transition"
             >
               {brand}: <span className="font-semibold">{count}</span>
             </button>
