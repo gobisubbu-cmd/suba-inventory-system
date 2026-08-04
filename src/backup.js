@@ -1,29 +1,40 @@
 // Daily stock safety-backup.
 //
 // Once a day — triggered by whoever opens the app first that day — this
-// writes a full JSON snapshot of the "items" collection into Firebase
-// Storage (completely separate from the live database), and optionally
-// emails a short summary to subabake@gmail.com via EmailJS.
+// writes a full snapshot of the "items" collection into its own Firestore
+// collection ("dailyBackups"), completely separate from the live "items"
+// collection, and optionally emails a short summary to subabake@gmail.com
+// via EmailJS.
 //
-// Why Storage and not another Firestore collection: a bug in the app (like
-// the field-wiping import bug found and fixed earlier) can only ever touch
-// Firestore documents through the app's own code. A file sitting in Storage
-// is untouched by any of that — it's a true "outside the blast radius" copy.
-// If the live data is ever damaged, the most recent backups/stock-backup-
-// YYYY-MM-DD.json file can be used to see exactly what every item looked
-// like on that date and manually restore what's needed.
+// Why a separate collection: a bug in the app (like the field-wiping import
+// bug found and fixed earlier) can only ever touch documents through the
+// app's own import/update code paths. Nothing in the app ever writes to
+// "dailyBackups" except this one function, so it's a true "outside the
+// blast radius" copy. If the live data is ever damaged, the most recent
+// dailyBackups/YYYY-MM-DD snapshot can be read to see exactly what every
+// item looked like on that date and manually restore what's needed.
+//
+// Why Firestore and not Firebase Storage: Storage now requires upgrading
+// this project to the paid "Blaze" plan (a billing account), even to stay
+// within the free usage limits. This project is on the free "Spark" plan,
+// and the whole point of this backup is not to add cost or need anyone to
+// hand over a credit card — so everything here uses plain Firestore, which
+// is already free and already in use throughout this app. A day's backup is
+// ~25-30 extra writes and one read per item (same as any full-catalogue
+// screen already does), nowhere close to the free daily quota.
 //
 // EmailJS is a client-side email service — no backend server or SMTP
 // password required. The three IDs below are meant to be public (EmailJS
 // scopes/rate-limits by them, similar to how a Firebase apiKey is public),
 // so it's safe to commit them here once the free EmailJS account is set up.
-// Leave them blank and the Storage backup still runs every day — only the
+// Leave them blank and the Firestore backup still runs every day — only the
 // email step is skipped.
-import { collection, getDocs, doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { ref, uploadString } from 'firebase/storage';
-import { db, storage } from './firebase';
+import { collection, doc, getDoc, getDocs, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
+import { db } from './firebase';
 
 const LOCAL_KEY = 'subaLastBackupDate';
+const ITEMS_PER_CHUNK = 300; // keeps each backup doc well under Firestore's 1MB-per-doc limit
+const CHUNK_DOCS_PER_BATCH = 20; // well under writeBatch's 400-operation limit
 
 const EMAILJS_SERVICE_ID = '';
 const EMAILJS_TEMPLATE_ID = '';
@@ -58,7 +69,7 @@ async function sendBackupEmail({ date, itemCount, totalStockValue, brandCounts }
   } catch (err) {
     // The backup itself already succeeded by the time this runs — a failed
     // notification email is not worth surfacing to the person using the app.
-    console.error('Backup summary email failed (the backup file itself was still saved):', err);
+    console.error('Backup summary email failed (the backup itself was still saved):', err);
   }
 }
 
@@ -88,13 +99,30 @@ export async function runDailyBackupIfNeeded() {
       brandCounts[brand] = (brandCounts[brand] || 0) + 1;
     });
 
-    const backupPayload = JSON.stringify({
-      generatedAt: new Date().toISOString(),
+    // Split the full catalogue into ~300-item chunk docs under
+    // dailyBackups/{date}/chunks/{n}, written in batches of 20 chunk-docs
+    // at a time (20 writes per batch, comfortably under the 400 limit).
+    const chunks = [];
+    for (let i = 0; i < items.length; i += ITEMS_PER_CHUNK) {
+      chunks.push(items.slice(i, i + ITEMS_PER_CHUNK));
+    }
+    for (let i = 0; i < chunks.length; i += CHUNK_DOCS_PER_BATCH) {
+      const batch = writeBatch(db);
+      chunks.slice(i, i + CHUNK_DOCS_PER_BATCH).forEach((chunkItems, offset) => {
+        const chunkRef = doc(db, 'dailyBackups', today, 'chunks', String(i + offset));
+        batch.set(chunkRef, { items: chunkItems });
+      });
+      await batch.commit();
+    }
+
+    await setDoc(doc(db, 'dailyBackups', today), {
+      date: today,
       itemCount: items.length,
-      items,
+      chunkCount: chunks.length,
+      totalStockValue,
+      brandCounts,
+      createdAt: serverTimestamp(),
     });
-    const fileRef = ref(storage, `backups/stock-backup-${today}.json`);
-    await uploadString(fileRef, backupPayload, 'raw', { contentType: 'application/json' });
 
     await setDoc(
       statusRef,
