@@ -34,7 +34,16 @@ import './index.css';
 export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [currentView, setCurrentView] = useState('dashboard');
+  // Phones (and small tablets in portrait) land straight in Field Mode —
+  // the desktop shell below (fixed sidebar + dense pages) was never built
+  // with a mobile breakpoint, so showing it on a small screen just means a
+  // squeezed, hard-to-use desktop layout. This check runs once on mount;
+  // it does not re-run on resize/rotation, so a user who explicitly exits
+  // Field Mode (or a tablet user who rotates to landscape) can still reach
+  // the full desktop app if they need it.
+  const [currentView, setCurrentView] = useState(() =>
+    (typeof window !== 'undefined' && window.innerWidth <= 768) ? 'field' : 'dashboard'
+  );
   const [userRole, setUserRole] = useState(null);
   // Set when a brand name is clicked on the Brands page — carries a
   // "brand::timestamp" token so Dashboard's effect fires even if the same
