@@ -13,6 +13,7 @@ import {
   getDocs,
   orderBy,
   limit,
+  updateDoc,
 } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 import {
@@ -29,6 +30,7 @@ import {
   History,
   Tags,
   Coins,
+  PackageSearch,
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
@@ -339,12 +341,20 @@ async function extractRowsFromFile(file) {
 }
 
 export default function ImportData({ userRole, userEmail }) {
-  const [mode, setMode] = useState('newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice'
+  const [mode, setMode] = useState('newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'unmatched'
   const [existingItems, setExistingItems] = useState([]);
+  const [pendingUnmatchedCount, setPendingUnmatchedCount] = useState(0);
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'items'), (snap) => {
       setExistingItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(query(collection(db, 'unmatchedImports'), where('status', '==', 'pending')), (snap) => {
+      setPendingUnmatchedCount(snap.size);
     });
     return unsub;
   }, []);
@@ -398,6 +408,19 @@ export default function ImportData({ userRole, userEmail }) {
         >
           <Coins size={16} /> Bulk Update Price
         </button>
+        <button
+          onClick={() => setMode('unmatched')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+            mode === 'unmatched' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <PackageSearch size={16} /> No-Match Report
+          {pendingUnmatchedCount > 0 && (
+            <span className="bg-red-600 text-white text-xs font-bold px-1.5 py-0.5 rounded-full leading-none">
+              {pendingUnmatchedCount}
+            </span>
+          )}
+        </button>
       </div>
 
       {mode === 'newItems' && (
@@ -411,6 +434,9 @@ export default function ImportData({ userRole, userEmail }) {
       )}
       {mode === 'bulkPrice' && (
         <BulkPriceUpdate existingItems={existingItems} userEmail={userEmail} />
+      )}
+      {mode === 'unmatched' && (
+        <UnmatchedImportsPanel existingItems={existingItems} userEmail={userEmail} />
       )}
     </div>
   );
@@ -832,6 +858,94 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
   );
 }
 
+// Shared stock-commit logic for one matched movement row. Used both by the
+// normal "Record Purchase / Issue / DC" flow and by the No-Match Report
+// panel (when someone goes back later and picks the correct item for a row
+// that had no match at import time). Runs the stock update + ledger entry
+// as one Firestore transaction, then a low-stock check and (for incoming
+// movements) a putaway line — exactly what handleRecord used to do inline.
+async function commitStockMovement({
+  itemId,
+  quantity,
+  unitCost,
+  movementId,
+  reason,
+  remarks,
+  extractedName,
+  supplier,
+  isReceiving,
+  transactionDate,
+  userEmail,
+  sourceLabel,
+}) {
+  const movement = MOVEMENT_TYPES.find((m) => m.id === movementId);
+  if (!movement) throw new Error('Unknown movement type.');
+  const qty = Number(quantity);
+  if (!qty || qty <= 0) throw new Error('Quantity must be greater than 0.');
+
+  const referenceKey = String(reason || '').trim().toLowerCase();
+  let committedItemName = '';
+  let committedItemCode = '';
+  let committedTxnId = '';
+
+  await runTransaction(db, async (tx) => {
+    const itemRef = doc(db, 'items', itemId);
+    const itemSnap = await tx.get(itemRef);
+    if (!itemSnap.exists()) throw new Error('Item no longer exists.');
+    const current = Number(itemSnap.data().currentStock || 0);
+    const delta = movement.direction === 'in' ? qty : -qty;
+    const newStock = current + delta;
+    if (newStock < 0) {
+      throw new Error(`${itemSnap.data().particulars}: would make stock negative (current ${current}, qty ${qty}).`);
+    }
+
+    const updates = { currentStock: newStock, updatedAt: serverTimestamp(), masterOnly: false };
+    if (movement.id === 'purchase' && unitCost) {
+      updates.avgCost = Number(unitCost);
+    }
+    tx.update(itemRef, updates);
+
+    const txnRef = doc(collection(db, 'transactions'));
+    tx.set(txnRef, {
+      itemId,
+      itemName: itemSnap.data().particulars,
+      brand: itemSnap.data().brand || '',
+      type: movement.id,
+      direction: movement.direction,
+      quantity: qty,
+      unitCost: unitCost ? Number(unitCost) : null,
+      reason: String(reason || '').trim() || `Imported from ${sourceLabel || 'file'}`,
+      referenceKey,
+      remarks: String(remarks || '').trim(),
+      extractedName: extractedName || '',
+      ...(isReceiving ? { supplier: String(supplier || '').trim() } : { customerName: String(supplier || '').trim() }),
+      performedByEmail: userEmail || '',
+      transactionDate,
+      createdAt: serverTimestamp(),
+    });
+    committedItemName = itemSnap.data().particulars;
+    committedItemCode = itemSnap.data().sno;
+    committedTxnId = txnRef.id;
+  });
+
+  await checkAndSendLowStockAlert(itemId);
+  if (isReceiving) {
+    await createPutawayLine({
+      itemId,
+      itemName: committedItemName,
+      itemCode: committedItemCode,
+      quantity: qty,
+      invoiceNumber: String(reason || '').trim() || sourceLabel || 'N/A',
+      invoiceDate: transactionDate,
+      supplier: String(supplier || '').trim(),
+      transactionId: committedTxnId,
+      userEmail,
+    });
+  }
+
+  return { itemName: committedItemName, itemCode: committedItemCode, txnId: committedTxnId };
+}
+
 function buildItemDoc(r, brand, sno, quantityOrNull) {
   const oldPartNumbers = String(r.oldPartCode || '')
     .split(',')
@@ -1112,9 +1226,46 @@ function MovementImport({ existingItems, userEmail }) {
   const [transactionDate, setTransactionDate] = useState(new Date().toISOString().slice(0, 10));
   const fileInputRef = useRef(null);
 
+  // Duplicate-reference guard: if this reference/invoice number was already
+  // used on a previous recorded movement, warn before letting it happen
+  // again — accidentally importing the same DC/invoice twice is exactly how
+  // stock gets double-counted.
+  const [dupMatches, setDupMatches] = useState([]);
+  const [confirmDuplicate, setConfirmDuplicate] = useState(false);
+
   const movement = MOVEMENT_TYPES.find((m) => m.id === movementType);
   const showUnitCost = movementType === 'purchase';
   const isReceiving = movement.direction === 'in';
+
+  useEffect(() => {
+    setConfirmDuplicate(false);
+    const key = reason.trim();
+    if (!key || key.length < 2 || rows.length === 0) {
+      setDupMatches([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const lower = key.toLowerCase();
+        const [byKeySnap, byTextSnap] = await Promise.all([
+          getDocs(query(collection(db, 'transactions'), where('referenceKey', '==', lower), limit(5))),
+          getDocs(query(collection(db, 'transactions'), where('reason', '==', key), limit(5))),
+        ]);
+        if (cancelled) return;
+        const byId = new Map();
+        [...byKeySnap.docs, ...byTextSnap.docs].forEach((d) => byId.set(d.id, { id: d.id, ...d.data() }));
+        setDupMatches(Array.from(byId.values()));
+      } catch (err) {
+        // Non-fatal — this is a safety warning, not a hard requirement.
+        console.warn('Duplicate reference check failed:', err);
+      }
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [reason, rows.length]);
 
   const itemOptions = useMemo(
     () => [...existingItems].sort((a, b) => (a.particulars || '').localeCompare(b.particulars || '')),
@@ -1213,72 +1364,56 @@ function MovementImport({ existingItems, userEmail }) {
     const failed = [];
     try {
       for (const r of matched) {
-        const qty = Number(r.quantity);
-        let committedItemName = '';
-        let committedItemCode = '';
-        let committedTxnId = '';
         try {
-          await runTransaction(db, async (tx) => {
-            const itemRef = doc(db, 'items', r.itemId);
-            const itemSnap = await tx.get(itemRef);
-            if (!itemSnap.exists()) throw new Error('Item no longer exists.');
-            const current = Number(itemSnap.data().currentStock || 0);
-            const delta = movement.direction === 'in' ? qty : -qty;
-            const newStock = current + delta;
-            if (newStock < 0) {
-              throw new Error(`${itemSnap.data().particulars}: would make stock negative (current ${current}, qty ${qty}).`);
-            }
-
-            const updates = { currentStock: newStock, updatedAt: serverTimestamp(), masterOnly: false };
-            if (movement.id === 'purchase' && r.unitCost) {
-              updates.avgCost = Number(r.unitCost);
-            }
-            tx.update(itemRef, updates);
-
-            const txnRef = doc(collection(db, 'transactions'));
-            tx.set(txnRef, {
-              itemId: r.itemId,
-              itemName: itemSnap.data().particulars,
-              brand: itemSnap.data().brand || '',
-              type: movement.id,
-              direction: movement.direction,
-              quantity: qty,
-              unitCost: r.unitCost ? Number(r.unitCost) : null,
-              reason: reason.trim() || `Imported from ${sourceLabel}`,
-              remarks: r.remarks?.trim() || '',
-              extractedName: r.particulars || '',
-              ...(isReceiving ? { supplier: supplier.trim() } : { customerName: supplier.trim() }),
-              performedByEmail: userEmail || '',
-              transactionDate,
-              createdAt: serverTimestamp(),
-            });
-            committedItemName = itemSnap.data().particulars;
-            committedItemCode = itemSnap.data().sno;
-            committedTxnId = txnRef.id;
+          await commitStockMovement({
+            itemId: r.itemId,
+            quantity: r.quantity,
+            unitCost: r.unitCost,
+            movementId: movement.id,
+            reason,
+            remarks: r.remarks,
+            extractedName: r.particulars,
+            supplier,
+            isReceiving,
+            transactionDate,
+            userEmail,
+            sourceLabel,
           });
-          await checkAndSendLowStockAlert(r.itemId);
-          if (isReceiving) {
-            await createPutawayLine({
-              itemId: r.itemId,
-              itemName: committedItemName,
-              itemCode: committedItemCode,
-              quantity: qty,
-              invoiceNumber: reason.trim() || sourceLabel || 'N/A',
-              invoiceDate: transactionDate,
-              supplier: supplier.trim(),
-              transactionId: committedTxnId,
-              userEmail,
-            });
-          }
           recorded += 1;
         } catch (err) {
           failed.push(err.message);
         }
       }
 
+      // Rows with no matching item aren't just dropped — save them to the
+      // No-Match Report so an admin can come back later, pick the correct
+      // item, and add it to stock then (see UnmatchedImportsPanel below).
+      if (unmatched.length) {
+        const batch = writeBatch(db);
+        unmatched.forEach((r) => {
+          const ref = doc(collection(db, 'unmatchedImports'));
+          batch.set(ref, {
+            extractedName: r.particulars || '',
+            quantity: Number(r.quantity) || 0,
+            unitCost: r.unitCost ? Number(r.unitCost) : null,
+            remarks: r.remarks?.trim() || '',
+            movementType: movement.id,
+            direction: movement.direction,
+            reason: reason.trim(),
+            supplier: supplier.trim(),
+            transactionDate,
+            sourceLabel,
+            status: 'pending',
+            importedByEmail: userEmail || '',
+            createdAt: serverTimestamp(),
+          });
+        });
+        await batch.commit();
+      }
+
       let message = `Recorded ${recorded} of ${matched.length} matched movement(s).`;
       if (unmatched.length) {
-        message += ` ${unmatched.length} row(s) had no matching item and were skipped: ${unmatched
+        message += ` ${unmatched.length} row(s) had no matching item and were saved to the No-Match Report for later review: ${unmatched
           .map((r) => r.particulars)
           .join(', ')}.`;
       }
@@ -1299,7 +1434,9 @@ function MovementImport({ existingItems, userEmail }) {
       <p className="text-gray-500 text-sm max-w-2xl">
         Upload a purchase invoice, delivery challan / sale document, or an Excel/CSV of movement lines. Each row is
         matched to an existing item by name — review and correct the match, quantity, and (for purchases) unit
-        cost before recording. This updates stock and writes to the ledger, it does not create new items.
+        cost before recording. This updates stock and writes to the ledger, it does not create new items. Rows with
+        no match are saved to the <strong>No-Match Report</strong> tab above so they can be corrected and added to
+        stock later instead of being lost.
       </p>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
@@ -1401,6 +1538,28 @@ function MovementImport({ existingItems, userEmail }) {
           </div>
         )}
 
+        {dupMatches.length > 0 && (
+          <div className="bg-red-50 border border-red-300 text-red-800 px-4 py-3 rounded text-sm space-y-2">
+            <p className="font-semibold flex items-start gap-2">
+              <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+              Reference "{reason.trim()}" was already recorded before — this may be a duplicate entry:
+            </p>
+            <ul className="list-disc list-inside space-y-0.5 ml-1">
+              {dupMatches.slice(0, 5).map((m) => (
+                <li key={m.id}>
+                  {m.itemName || m.extractedName} × {m.quantity} ({DOC_TYPE_LABELS[m.type] || m.type || 'movement'}) on{' '}
+                  {m.transactionDate || (m.createdAt?.toDate ? m.createdAt.toDate().toLocaleDateString() : 'unknown date')}
+                  {m.performedByEmail ? ` by ${m.performedByEmail}` : ''}
+                </li>
+              ))}
+            </ul>
+            <label className="flex items-center gap-2 font-medium cursor-pointer">
+              <input type="checkbox" checked={confirmDuplicate} onChange={(e) => setConfirmDuplicate(e.target.checked)} />
+              I've checked — this is not a duplicate, record anyway
+            </label>
+          </div>
+        )}
+
         {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
         {success && (
           <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-2 rounded text-sm flex items-start gap-2">
@@ -1415,7 +1574,8 @@ function MovementImport({ existingItems, userEmail }) {
             <h2 className="font-semibold text-gray-800">Review extracted rows ({rows.length})</h2>
             <button
               onClick={handleRecord}
-              disabled={busy}
+              disabled={busy || (dupMatches.length > 0 && !confirmDuplicate)}
+              title={dupMatches.length > 0 && !confirmDuplicate ? 'Confirm the duplicate-reference warning above first' : ''}
               className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg disabled:opacity-50"
             >
               {busy ? 'Recording...' : `Record ${rows.length} Movement(s)`}
@@ -1888,6 +2048,199 @@ function BulkPriceUpdate({ existingItems, userEmail }) {
         {busy ? 'Applying...' : 'Upload Part Number + Price File'}
         <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy || !brand} />
       </label>
+    </div>
+  );
+}
+
+// No-Match Report — every row from "Record Purchase / Issue / DC" that
+// couldn't be auto-matched to a catalogue item gets saved here (see
+// handleRecord in MovementImport) instead of just being skipped. An admin
+// can come back anytime, pick the correct item for a row, and add it to
+// stock right from this panel — it runs the exact same stock-commit logic
+// as the normal Record flow.
+function UnmatchedImportsPanel({ existingItems, userEmail }) {
+  const [pending, setPending] = useState([]);
+  const [showResolved, setShowResolved] = useState(false);
+  const [resolved, setResolved] = useState([]);
+  const [selections, setSelections] = useState({}); // rowId -> itemId
+  const [rowBusy, setRowBusy] = useState({});
+  const [rowError, setRowError] = useState({});
+  const [rowDone, setRowDone] = useState({});
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(collection(db, 'unmatchedImports'), where('status', '==', 'pending'), orderBy('createdAt', 'desc'), limit(300)),
+      (snap) => setPending(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+    );
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (!showResolved) {
+      setResolved([]);
+      return;
+    }
+    const unsub = onSnapshot(
+      query(collection(db, 'unmatchedImports'), where('status', '==', 'resolved'), orderBy('resolvedAt', 'desc'), limit(100)),
+      (snap) => setResolved(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+    );
+    return unsub;
+  }, [showResolved]);
+
+  const itemOptions = useMemo(
+    () => [...existingItems].sort((a, b) => (a.particulars || '').localeCompare(b.particulars || '')),
+    [existingItems]
+  );
+
+  const handleAddToStock = async (row) => {
+    const itemId = selections[row.id];
+    if (!itemId) {
+      setRowError((p) => ({ ...p, [row.id]: 'Select the correct item first.' }));
+      return;
+    }
+    setRowBusy((p) => ({ ...p, [row.id]: true }));
+    setRowError((p) => ({ ...p, [row.id]: '' }));
+    try {
+      await commitStockMovement({
+        itemId,
+        quantity: row.quantity,
+        unitCost: row.unitCost,
+        movementId: row.movementType,
+        reason: row.reason,
+        remarks: row.remarks,
+        extractedName: row.extractedName,
+        supplier: row.supplier,
+        isReceiving: row.direction === 'in',
+        transactionDate: row.transactionDate,
+        userEmail,
+        sourceLabel: row.sourceLabel,
+      });
+      await updateDoc(doc(db, 'unmatchedImports', row.id), {
+        status: 'resolved',
+        resolvedItemId: itemId,
+        resolvedByEmail: userEmail || '',
+        resolvedAt: serverTimestamp(),
+      });
+      setRowDone((p) => ({ ...p, [row.id]: true }));
+    } catch (err) {
+      setRowError((p) => ({ ...p, [row.id]: err.message || 'Failed to add to stock.' }));
+    } finally {
+      setRowBusy((p) => ({ ...p, [row.id]: false }));
+    }
+  };
+
+  const renderRow = (row, isResolved) => (
+    <tr key={row.id} className="border-b last:border-0 align-top">
+      <td className="px-3 py-2">
+        <div className="font-medium text-gray-800">{row.extractedName || '(blank)'}</div>
+        <div className="text-xs text-gray-400">
+          {row.createdAt?.toDate ? row.createdAt.toDate().toLocaleString() : ''}
+          {row.sourceLabel ? ` · ${row.sourceLabel}` : ''}
+        </div>
+      </td>
+      <td className="px-3 py-2 text-gray-600">{DOC_TYPE_LABELS[row.movementType] || row.movementType}</td>
+      <td className="px-3 py-2 text-gray-600">{row.reason || '—'}</td>
+      <td className="px-3 py-2 text-gray-600">{row.supplier || '—'}</td>
+      <td className="px-3 py-2 text-right text-gray-600">{row.quantity}</td>
+      <td className="px-3 py-2">
+        {isResolved ? (
+          <span className="text-emerald-700 text-xs">
+            Matched {row.resolvedByEmail ? `by ${row.resolvedByEmail}` : ''}
+            {row.resolvedAt?.toDate ? ` on ${row.resolvedAt.toDate().toLocaleDateString()}` : ''}
+          </span>
+        ) : (
+          <SearchableItemSelect
+            items={itemOptions}
+            value={selections[row.id] || ''}
+            onChange={(id) => setSelections((p) => ({ ...p, [row.id]: id }))}
+          />
+        )}
+      </td>
+      {!isResolved && (
+        <td className="px-3 py-2">
+          {rowDone[row.id] ? (
+            <span className="text-emerald-700 text-xs flex items-center gap-1">
+              <CheckCircle2 size={14} /> Added
+            </span>
+          ) : (
+            <button
+              onClick={() => handleAddToStock(row)}
+              disabled={rowBusy[row.id]}
+              className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold px-3 py-1.5 rounded disabled:opacity-50"
+            >
+              {rowBusy[row.id] ? 'Adding...' : 'Add to Stock'}
+            </button>
+          )}
+          {rowError[row.id] && <div className="text-red-600 text-xs mt-1 max-w-[14rem]">{rowError[row.id]}</div>}
+        </td>
+      )}
+    </tr>
+  );
+
+  return (
+    <div className="space-y-4">
+      <p className="text-gray-500 text-sm max-w-2xl">
+        Rows from "Record Purchase / Issue / DC" that couldn't be matched to a catalogue item land here instead of
+        being lost. Pick the correct item for a row and click <strong>Add to Stock</strong> to commit it — the
+        original quantity, cost, reference number and date from the import are kept.
+      </p>
+
+      <div className="bg-white rounded-lg shadow overflow-x-auto">
+        <div className="flex items-center justify-between p-4 border-b">
+          <h2 className="font-semibold text-gray-800">Pending ({pending.length})</h2>
+        </div>
+        {pending.length === 0 ? (
+          <p className="text-sm text-gray-400 italic px-4 py-6">Nothing waiting for review.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 border-b">
+              <tr>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Extracted Name</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Type</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Reference</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Supplier / Customer</th>
+                <th className="text-right px-3 py-2 font-semibold text-gray-600">Qty</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Correct Item</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>{pending.map((row) => renderRow(row, false))}</tbody>
+          </table>
+        )}
+      </div>
+
+      <button
+        onClick={() => setShowResolved((s) => !s)}
+        className="text-sm text-gray-500 hover:text-gray-700 underline"
+      >
+        {showResolved ? 'Hide resolved' : 'Show resolved'}
+      </button>
+
+      {showResolved && (
+        <div className="bg-white rounded-lg shadow overflow-x-auto">
+          <div className="flex items-center gap-2 p-4 border-b">
+            <History size={18} className="text-gray-500" />
+            <h2 className="font-semibold text-gray-800">Resolved ({resolved.length})</h2>
+          </div>
+          {resolved.length === 0 ? (
+            <p className="text-sm text-gray-400 italic px-4 py-6">Nothing resolved yet.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 border-b">
+                <tr>
+                  <th className="text-left px-3 py-2 font-semibold text-gray-600">Extracted Name</th>
+                  <th className="text-left px-3 py-2 font-semibold text-gray-600">Type</th>
+                  <th className="text-left px-3 py-2 font-semibold text-gray-600">Reference</th>
+                  <th className="text-left px-3 py-2 font-semibold text-gray-600">Supplier / Customer</th>
+                  <th className="text-right px-3 py-2 font-semibold text-gray-600">Qty</th>
+                  <th className="text-left px-3 py-2 font-semibold text-gray-600">Resolved</th>
+                </tr>
+              </thead>
+              <tbody>{resolved.map((row) => renderRow(row, true))}</tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 }
