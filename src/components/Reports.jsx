@@ -335,6 +335,59 @@ export default function Reports({ userRole, userEmail }) {
   // the record entirely removes all trace of it — leaves one minimal entry
   // in a separate deletedTransactionsLog so there's still an answer to
   // "did something get deleted here, by whom, and why" if that's ever asked.
+  // Core single-transaction reversal + delete + cleanup + audit-log, shared
+  // by both the single-row Delete button and the bulk "delete everything
+  // under this reference number" tool below. Throws on failure (e.g. would
+  // make stock negative) so callers can decide how to handle a partial
+  // batch.
+  async function deleteOneTransaction(t, reasonText) {
+    await runTransaction(db, async (tx) => {
+      const itemRef = doc(db, 'items', t.itemId);
+      const itemSnap = await tx.get(itemRef);
+      if (!itemSnap.exists()) {
+        throw new Error(`${t.itemName}: item no longer exists — cannot safely reverse stock.`);
+      }
+      const current = Number(itemSnap.data().currentStock || 0);
+      // Reversing an inward movement means removing what it added;
+      // reversing an outward movement means putting back what it removed.
+      const delta = t.direction === 'in' ? -Number(t.quantity || 0) : Number(t.quantity || 0);
+      const newStock = current + delta;
+      if (newStock < 0) {
+        throw new Error(
+          `${t.itemName}: would make stock negative (current ${current}). Some of this quantity may already have been issued or sold elsewhere.`
+        );
+      }
+      tx.update(itemRef, { currentStock: newStock, updatedAt: serverTimestamp() });
+      tx.delete(doc(db, 'transactions', t.id));
+    });
+
+    // Best-effort cleanup of any put-away line this transaction created —
+    // otherwise a "LOCATION PENDING" line would be left pointing at a
+    // transaction that no longer exists.
+    try {
+      const pq = query(collection(db, 'putawayLines'), where('transactionId', '==', t.id));
+      const psnap = await getDocs(pq);
+      await Promise.all(psnap.docs.map((d) => deleteDoc(doc(db, 'putawayLines', d.id))));
+    } catch (e) {
+      // Non-fatal — the main deletion already succeeded.
+    }
+
+    await addDoc(collection(db, 'deletedTransactionsLog'), {
+      originalTransactionId: t.id,
+      itemId: t.itemId,
+      itemName: t.itemName,
+      type: t.type,
+      direction: t.direction,
+      quantity: t.quantity,
+      reference: t.reason || '',
+      transactionDate: t.transactionDate || '',
+      originallyPerformedByEmail: t.performedByEmail || '',
+      deletedByEmail: userEmail || '',
+      deleteReason: reasonText,
+      deletedAt: serverTimestamp(),
+    });
+  }
+
   const confirmDeleteTransaction = async () => {
     if (!deleteTarget) return;
     if (!deleteReason.trim()) {
@@ -343,54 +396,8 @@ export default function Reports({ userRole, userEmail }) {
     }
     setDeleting(true);
     setDeleteError('');
-    const t = deleteTarget;
     try {
-      await runTransaction(db, async (tx) => {
-        const itemRef = doc(db, 'items', t.itemId);
-        const itemSnap = await tx.get(itemRef);
-        if (!itemSnap.exists()) {
-          throw new Error('The item this transaction belongs to no longer exists — cannot safely reverse stock.');
-        }
-        const current = Number(itemSnap.data().currentStock || 0);
-        // Reversing an inward movement means removing what it added;
-        // reversing an outward movement means putting back what it removed.
-        const delta = t.direction === 'in' ? -Number(t.quantity || 0) : Number(t.quantity || 0);
-        const newStock = current + delta;
-        if (newStock < 0) {
-          throw new Error(
-            `Can't delete this — reversing it would make "${t.itemName}" stock negative (current stock ${current}). Some of this quantity may already have been issued or sold elsewhere. Use Stock Adjustment to investigate and correct the balance instead.`
-          );
-        }
-        tx.update(itemRef, { currentStock: newStock, updatedAt: serverTimestamp() });
-        tx.delete(doc(db, 'transactions', t.id));
-      });
-
-      // Best-effort cleanup of any put-away line this transaction created —
-      // otherwise a "LOCATION PENDING" line would be left pointing at a
-      // transaction that no longer exists.
-      try {
-        const pq = query(collection(db, 'putawayLines'), where('transactionId', '==', t.id));
-        const psnap = await getDocs(pq);
-        await Promise.all(psnap.docs.map((d) => deleteDoc(doc(db, 'putawayLines', d.id))));
-      } catch (e) {
-        // Non-fatal — the main deletion already succeeded.
-      }
-
-      await addDoc(collection(db, 'deletedTransactionsLog'), {
-        originalTransactionId: t.id,
-        itemId: t.itemId,
-        itemName: t.itemName,
-        type: t.type,
-        direction: t.direction,
-        quantity: t.quantity,
-        reference: t.reason || '',
-        transactionDate: t.transactionDate || '',
-        originallyPerformedByEmail: t.performedByEmail || '',
-        deletedByEmail: userEmail || '',
-        deleteReason: deleteReason.trim(),
-        deletedAt: serverTimestamp(),
-      });
-
+      await deleteOneTransaction(deleteTarget, deleteReason.trim());
       setDeleteTarget(null);
       setDeleteReason('');
     } catch (err) {
@@ -398,6 +405,66 @@ export default function Reports({ userRole, userEmail }) {
     } finally {
       setDeleting(false);
     }
+  };
+
+  // --- Bulk delete: every transaction tagged with a given reference number ---
+  // For "we uploaded the same document wrong so many times, just wipe this
+  // reference and let us start clean." Deletes in a stock-safe order — every
+  // OUTWARD entry first (always safe, stock only goes up), then every INWARD
+  // entry (safe once the outward reversals have created headroom) — so nets
+  // to the correct pre-shipment baseline without ever dipping negative
+  // mid-way, regardless of how tangled the history under that reference is.
+  const [bulkRefInput, setBulkRefInput] = useState('');
+  const [bulkPreview, setBulkPreview] = useState(null); // { key, rows } once previewed
+  const [bulkReason, setBulkReason] = useState('');
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkResult, setBulkResult] = useState('');
+  const [bulkError, setBulkError] = useState('');
+
+  const previewBulkDelete = () => {
+    const key = bulkRefInput.trim().toLowerCase();
+    setBulkResult('');
+    setBulkError('');
+    if (!key) {
+      setBulkPreview(null);
+      return;
+    }
+    const rows = transactions.filter((t) => String(t.reason || '').trim().toLowerCase() === key);
+    setBulkPreview({ key: bulkRefInput.trim(), rows });
+  };
+
+  const runBulkDelete = async () => {
+    if (!bulkPreview || bulkPreview.rows.length === 0) return;
+    if (!bulkReason.trim()) {
+      setBulkError('A reason is required before deleting.');
+      return;
+    }
+    setBulkBusy(true);
+    setBulkError('');
+    setBulkResult('');
+    const ordered = [
+      ...bulkPreview.rows.filter((t) => t.direction === 'out'),
+      ...bulkPreview.rows.filter((t) => t.direction === 'in'),
+    ];
+    let done = 0;
+    const failed = [];
+    for (const t of ordered) {
+      try {
+        await deleteOneTransaction(t, bulkReason.trim());
+        done += 1;
+      } catch (err) {
+        failed.push(`${t.itemName} (${t.type}, ${t.direction}): ${err.message}`);
+      }
+    }
+    setBulkBusy(false);
+    let msg = `Deleted ${done} of ${ordered.length} transaction(s) for reference "${bulkPreview.key}".`;
+    if (failed.length) {
+      msg += ` ${failed.length} could not be deleted: ${failed.join(' | ')}`;
+    }
+    setBulkResult(msg);
+    setBulkPreview(null);
+    setBulkRefInput('');
+    setBulkReason('');
   };
 
   // --- Warehouse Put-away reports ---
@@ -878,6 +945,111 @@ export default function Reports({ userRole, userEmail }) {
           Location History in the left menu.
         </p>
       </div>
+
+      {isAdmin && (
+        <div className="bg-white rounded-lg shadow p-6 space-y-4 border-2 border-red-100">
+          <div className="flex items-center gap-2">
+            <Trash2 className="text-red-600" size={20} />
+            <h2 className="font-semibold text-gray-800">Bulk Delete by Reference Number</h2>
+          </div>
+          <p className="text-xs text-gray-400">
+            For a reference number that was uploaded wrong repeatedly (e.g. a packing list that kept getting
+            recorded as outward instead of inward) — enter the exact reference/document number, review every
+            transaction it will affect, then delete all of them in one go. Each one's stock effect is correctly
+            reversed and everything is removed in a safe order so stock never goes negative mid-way. Admin only.
+          </p>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex-1 min-w-[220px]">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Reference / Document No.</label>
+              <input
+                type="text"
+                value={bulkRefInput}
+                onChange={(e) => setBulkRefInput(e.target.value)}
+                placeholder="e.g. 184134543"
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-red-500"
+              />
+            </div>
+            <button
+              onClick={previewBulkDelete}
+              disabled={!bulkRefInput.trim()}
+              className="border border-gray-400 text-gray-700 hover:bg-gray-50 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50"
+            >
+              Find Transactions
+            </button>
+          </div>
+
+          {bulkResult && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded text-sm">{bulkResult}</div>
+          )}
+
+          {bulkPreview && (
+            <div className="border rounded-lg overflow-hidden">
+              <div className="bg-red-50 border-b border-red-200 px-4 py-2 text-sm font-medium text-red-800">
+                {bulkPreview.rows.length === 0
+                  ? `No transactions found for reference "${bulkPreview.key}".`
+                  : `${bulkPreview.rows.length} transaction(s) found for reference "${bulkPreview.key}" — all of these will be permanently deleted:`}
+              </div>
+              {bulkPreview.rows.length > 0 && (
+                <>
+                  <div className="max-h-64 overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 border-b sticky top-0">
+                        <tr>
+                          <th className="text-left px-3 py-2 font-semibold text-gray-600">Date</th>
+                          <th className="text-left px-3 py-2 font-semibold text-gray-600">Item</th>
+                          <th className="text-left px-3 py-2 font-semibold text-gray-600">Type</th>
+                          <th className="text-right px-3 py-2 font-semibold text-gray-600">Qty</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bulkPreview.rows.map((t) => (
+                          <tr key={t.id} className="border-b last:border-0">
+                            <td className="px-3 py-2">{t.transactionDate || effectiveDate(t)?.toLocaleDateString() || ''}</td>
+                            <td className="px-3 py-2">{t.itemName}</td>
+                            <td className="px-3 py-2 capitalize">{t.type} ({t.direction})</td>
+                            <td className="px-3 py-2 text-right">{t.quantity}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="p-4 space-y-3 border-t">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Reason for deleting all of these *</label>
+                      <input
+                        type="text"
+                        value={bulkReason}
+                        onChange={(e) => setBulkReason(e.target.value)}
+                        placeholder="e.g. Reference uploaded wrong multiple times — clearing to start fresh"
+                        className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-red-500"
+                      />
+                    </div>
+                    {bulkError && (
+                      <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm">{bulkError}</div>
+                    )}
+                    <div className="flex items-center justify-end gap-3">
+                      <button
+                        onClick={() => setBulkPreview(null)}
+                        disabled={bulkBusy}
+                        className="px-4 py-2 rounded-lg border text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={runBulkDelete}
+                        disabled={bulkBusy}
+                        className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold disabled:opacity-50"
+                      >
+                        {bulkBusy ? 'Deleting...' : `Permanently Delete All ${bulkPreview.rows.length}`}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
         <div className="flex items-center justify-between flex-wrap gap-2">
