@@ -1387,6 +1387,14 @@ function MovementImport({ existingItems, userEmail }) {
     setError('');
     setSuccess('');
     const withQty = rows.filter((r) => Number(r.quantity) > 0);
+    // Rows with a blank/zero quantity were previously dropped with zero
+    // indication anywhere — not recorded, not sent to the No-Match Report,
+    // not even mentioned in the success message. On a large multi-row
+    // packing list it's very easy to record before every row has a
+    // quantity filled in, and the rows silently vanish the moment you
+    // navigate away (this state only lives in memory until then). Now
+    // they're always called out explicitly so nothing goes missing quietly.
+    const zeroQty = rows.filter((r) => !(Number(r.quantity) > 0));
     if (withQty.length === 0) {
       setError('Enter a quantity greater than 0 for at least one row.');
       return;
@@ -1455,6 +1463,11 @@ function MovementImport({ existingItems, userEmail }) {
       let message = `Recorded ${recorded} of ${matched.length} matched movement(s).`;
       if (unmatched.length) {
         message += ` ${unmatched.length} row(s) had no matching item and were saved to the No-Match Report for later review: ${unmatched
+          .map((r) => r.particulars)
+          .join(', ')}.`;
+      }
+      if (zeroQty.length) {
+        message += ` ⚠️ ${zeroQty.length} row(s) still have NO QUANTITY entered and were NOT recorded (still shown below — fill in a quantity and click Record again, or they will be lost if you leave this page): ${zeroQty
           .map((r) => r.particulars)
           .join(', ')}.`;
       }
