@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
-import { BarChart3, Download } from 'lucide-react';
+import { BarChart3, Download, Maximize2, X } from 'lucide-react';
 import { daysPending, LOCATION_STATUS } from '../putaway';
 import { computeStockStatus } from '../lib/brands';
 
@@ -47,6 +47,7 @@ export default function Reports({ userRole }) {
   const [endDate, setEndDate] = useState('');
   const [ioStartDate, setIoStartDate] = useState('');
   const [ioEndDate, setIoEndDate] = useState('');
+  const [showMovementModal, setShowMovementModal] = useState(false);
 
   // Firestore's onSnapshot listeners deliver data asynchronously — if a
   // report button is clicked before the first snapshot arrives, `items`
@@ -187,7 +188,7 @@ export default function Reports({ userRole }) {
       ...(canSeeValue ? { 'Unit Cost': '', Value: '' } : {}),
       Type: '',
       'Supplier/Customer': '',
-      Reference: '',
+      'Reference / Doc No. (Packing List / Invoice / DC)': '',
       'Performed By': '',
     });
 
@@ -217,7 +218,7 @@ export default function Reports({ userRole }) {
           ...(canSeeValue ? { 'Unit Cost': t.unitCost || '', Value: Math.round(value * 100) / 100 } : {}),
           Type: t.type || '',
           'Supplier/Customer': t.supplier || t.customerName || '',
-          Reference: t.reason || '',
+          'Reference / Doc No. (Packing List / Invoice / DC)': t.reason || '(No reference number)',
           'Performed By': t.performedByEmail || '',
         });
       });
@@ -787,11 +788,21 @@ export default function Reports({ userRole }) {
       </div>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
-        <h2 className="font-semibold text-gray-800">Date-Range Movement Report</h2>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="font-semibold text-gray-800">Date-Range Movement Report</h2>
+          <button
+            onClick={() => setShowMovementModal(true)}
+            title="Open the data in a larger, zoomed view"
+            className="flex items-center gap-1.5 text-emerald-700 hover:text-white border border-emerald-600 hover:bg-emerald-600 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors"
+          >
+            <Maximize2 size={15} /> View / Zoom Data
+          </button>
+        </div>
         <p className="text-xs text-gray-400">
           Filters and sorts by each movement's actual <strong>Transaction Date</strong> — not when it was uploaded —
           so a document entered late still lands in the correct period. "Uploaded On" is kept alongside it as the
-          audit-trail record of when it was actually typed into the system.
+          audit-trail record of when it was actually typed into the system. Click "View / Zoom Data" to browse the
+          rows in a larger window instead of scrolling this page.
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <div>
@@ -804,49 +815,76 @@ export default function Reports({ userRole }) {
           </div>
           <ReportButton disabled={!dataReady} label="Export Range" onClick={() => exportMovements(null)} />
         </div>
-
-        <div className="overflow-x-auto mt-4">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 border-b">
-              <tr>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Transaction Date</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Uploaded On</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Item</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Type</th>
-                <th className="text-right px-3 py-2 font-semibold text-gray-600">Qty</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Reason</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">By</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredTxns.slice(0, 50).map((t) => (
-                <tr key={t.id} className="border-b last:border-0">
-                  <td className="px-3 py-2">{t.transactionDate || effectiveDate(t)?.toLocaleDateString() || ''}</td>
-                  <td className="px-3 py-2 text-gray-400">{toDate(t.createdAt)?.toLocaleString() || ''}</td>
-                  <td className="px-3 py-2">{t.itemName}</td>
-                  <td className="px-3 py-2 capitalize">{t.type} ({t.direction})</td>
-                  <td className="px-3 py-2 text-right">{t.quantity}</td>
-                  <td className="px-3 py-2">{t.reason}</td>
-                  <td className="px-3 py-2">{t.performedByEmail}</td>
-                </tr>
-              ))}
-              {filteredTxns.length === 0 && (
-                <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-gray-400">No transactions in range.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
       </div>
+
+      {showMovementModal && (
+        <div
+          className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+          onClick={() => setShowMovementModal(false)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[88vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b shrink-0">
+              <h3 className="font-semibold text-gray-800 text-lg">
+                Date-Range Movement Report
+                {filteredTxns.length > 0 && (
+                  <span className="text-sm font-normal text-gray-400 ml-2">
+                    (showing {Math.min(filteredTxns.length, 50)} of {filteredTxns.length})
+                  </span>
+                )}
+              </h3>
+              <button onClick={() => setShowMovementModal(false)} className="text-gray-400 hover:text-gray-700 p-1">
+                <X size={22} />
+              </button>
+            </div>
+            <div className="overflow-auto p-6">
+              <table className="w-full text-base">
+                <thead className="bg-gray-50 border-b sticky top-0">
+                  <tr>
+                    <th className="text-left px-4 py-3 font-semibold text-gray-600">Transaction Date</th>
+                    <th className="text-left px-4 py-3 font-semibold text-gray-600">Uploaded On</th>
+                    <th className="text-left px-4 py-3 font-semibold text-gray-600">Item</th>
+                    <th className="text-left px-4 py-3 font-semibold text-gray-600">Type</th>
+                    <th className="text-right px-4 py-3 font-semibold text-gray-600">Qty</th>
+                    <th className="text-left px-4 py-3 font-semibold text-gray-600">Reason / Reference</th>
+                    <th className="text-left px-4 py-3 font-semibold text-gray-600">By</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredTxns.slice(0, 50).map((t) => (
+                    <tr key={t.id} className="border-b last:border-0">
+                      <td className="px-4 py-3">{t.transactionDate || effectiveDate(t)?.toLocaleDateString() || ''}</td>
+                      <td className="px-4 py-3 text-gray-400">{toDate(t.createdAt)?.toLocaleString() || ''}</td>
+                      <td className="px-4 py-3">{t.itemName}</td>
+                      <td className="px-4 py-3 capitalize">{t.type} ({t.direction})</td>
+                      <td className="px-4 py-3 text-right">{t.quantity}</td>
+                      <td className="px-4 py-3">{t.reason}</td>
+                      <td className="px-4 py-3">{t.performedByEmail}</td>
+                    </tr>
+                  ))}
+                  {filteredTxns.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-4 py-8 text-center text-gray-400">No transactions in range.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
         <h2 className="font-semibold text-gray-800">Inward / Outward Stock Report</h2>
         <p className="text-xs text-gray-400">
           Inward = Purchases, Returns, and any admin stock-adjustment increases. Outward = Issues, Delivery
           Challans/Sales, and admin stock-adjustment decreases. Each export lists every part line — Part Code,
-          Particulars, Quantity — grouped under its Day/Month/Year/Reference with a subtotal after each group and
-          a grand total at the end. Leave dates blank to include all history.
+          Particulars, Quantity, and the Reference / Document Number (whatever was typed into "Reason / Reference"
+          when it was recorded — the Packing List No, Invoice No, or DC No) — grouped under its Day/Month/Year/
+          Reference with a subtotal after each group and a grand total at the end. Leave dates blank to include
+          all history.
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <div>
