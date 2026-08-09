@@ -58,9 +58,17 @@ export const STOCK_STATUS_STYLES = {
 
 // A part is searchable/matchable by EITHER its current (new) part number or
 // any of its superseded (old) part numbers — RATIONAL requirement #15.
+//
+// Some items only ever had `partCode` set (never `partNumber`) — e.g. older
+// bulk/reference-list imports that predate the two fields being kept in
+// sync — so Dashboard's own display/search already falls back to partCode.
+// This is the one shared place every matcher (Import Data, Spare Search,
+// etc.) should go through, so it needs the same fallback or those items
+// stay invisible to matching even though they're visible everywhere else.
 export function allPartNumbers(item) {
   const list = [];
   if (item.partNumber) list.push(item.partNumber);
+  if (item.partCode && item.partCode !== item.partNumber) list.push(item.partCode);
   if (Array.isArray(item.oldPartNumbers)) list.push(...item.oldPartNumbers.filter(Boolean));
   return list;
 }
