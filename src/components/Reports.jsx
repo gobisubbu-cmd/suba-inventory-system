@@ -136,12 +136,14 @@ export default function Reports({ userRole }) {
     });
   }, [transactions, ioStartDate, ioEndDate]);
 
-  // --- Inward / Outward rollups (day / month / year / reference-number wise) ---
+  // --- Inward / Outward detailed reports (day / month / year / reference-number wise) ---
   // "Inward" = every transaction whose direction is 'in' (Purchase, Return,
   // and any admin Stock Adjustment marked increase). "Outward" = direction
-  // 'out' (Issue, Delivery Challan/Sale, and decrease adjustments). The
-  // Type(s) column on each row discloses exactly what's rolled into it, so
-  // corrections aren't silently hidden inside a "purchase" number.
+  // 'out' (Issue, Delivery Challan/Sale, and decrease adjustments).
+  // Each export lists every line item (part code, name, quantity) grouped
+  // under its day/month/year/reference, with a subtotal after each group
+  // and a grand total at the end — not just a rolled-up total row, so you
+  // can see exactly which parts made up each number.
   const dayKey = (t) => {
     const d = effectiveDate(t);
     if (!d) return 'Unknown Date';
@@ -157,46 +159,85 @@ export default function Reports({ userRole }) {
   };
   const referenceGroupKey = (t) => (t.reason && t.reason.trim()) || '(No reference number)';
 
-  function rollupByKey(rows, keyFn) {
+  const itemsById = useMemo(() => {
     const map = new Map();
-    rows.forEach((t) => {
-      const key = keyFn(t);
-      const r = map.get(key) || { key, qty: 0, value: 0, count: 0, types: new Set(), parties: new Set(), items: new Set() };
-      r.qty += Number(t.quantity || 0);
-      r.value += Number(t.quantity || 0) * Number(t.unitCost || 0);
-      r.count += 1;
-      if (t.type) r.types.add(t.type);
-      const party = t.supplier || t.customerName || '';
-      if (party) r.parties.add(party);
-      if (t.itemName) r.items.add(t.itemName);
-      map.set(key, r);
-    });
-    return Array.from(map.values()).sort((a, b) => String(a.key).localeCompare(String(b.key)));
-  }
+    items.forEach((it) => map.set(it.id, it));
+    return map;
+  }, [items]);
 
   function exportDirectionRollup(direction, groupLabel, keyFn, filename) {
     const rows = ioFilteredTxns.filter((t) => t.direction === direction);
-    const rollups = rollupByKey(rows, keyFn);
-    const out = rollups.map((r) => ({
-      [groupLabel]: r.key,
-      Transactions: r.count,
-      'Total Qty': r.qty,
-      ...(canSeeValue ? { 'Total Value': Math.round(r.value * 100) / 100 } : {}),
-      'Items Involved': r.items.size,
-      'Type(s)': Array.from(r.types).join(', '),
-      'Supplier/Customer': Array.from(r.parties).join(', '),
-    }));
-    const totalQty = rollups.reduce((s, r) => s + r.qty, 0);
-    const totalValue = rollups.reduce((s, r) => s + r.value, 0);
-    out.push({
-      [groupLabel]: `TOTAL (${rollups.length} ${groupLabel.toLowerCase()} group${rollups.length === 1 ? '' : 's'})`,
-      Transactions: rows.length,
-      'Total Qty': totalQty,
-      ...(canSeeValue ? { 'Total Value': Math.round(totalValue * 100) / 100 } : {}),
-      'Items Involved': '',
-      'Type(s)': '',
-      'Supplier/Customer': '',
+
+    const groups = new Map();
+    rows.forEach((t) => {
+      const key = keyFn(t);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(t);
     });
+    const sortedKeys = Array.from(groups.keys()).sort((a, b) => String(a).localeCompare(String(b)));
+
+    const blankRow = () => ({
+      [groupLabel]: '',
+      'Transaction Date': '',
+      'Part Code': '',
+      Particulars: '',
+      Brand: '',
+      Quantity: '',
+      Unit: '',
+      ...(canSeeValue ? { 'Unit Cost': '', Value: '' } : {}),
+      Type: '',
+      'Supplier/Customer': '',
+      Reference: '',
+      'Performed By': '',
+    });
+
+    const out = [];
+    let grandQty = 0;
+    let grandValue = 0;
+
+    sortedKeys.forEach((key) => {
+      const groupRows = groups.get(key).sort((a, b) => (effectiveDate(a)?.getTime() || 0) - (effectiveDate(b)?.getTime() || 0));
+      let groupQty = 0;
+      let groupValue = 0;
+      groupRows.forEach((t) => {
+        const it = itemsById.get(t.itemId);
+        const partCode = (it && (it.partNumber || it.partCode)) || '';
+        const qty = Number(t.quantity || 0);
+        const value = qty * Number(t.unitCost || 0);
+        groupQty += qty;
+        groupValue += value;
+        out.push({
+          [groupLabel]: key,
+          'Transaction Date': t.transactionDate || effectiveDate(t)?.toLocaleDateString() || '',
+          'Part Code': partCode,
+          Particulars: t.itemName || (it ? it.particulars : '') || '',
+          Brand: t.brand || (it ? it.brand : '') || '',
+          Quantity: qty,
+          Unit: (it && it.unit) || '',
+          ...(canSeeValue ? { 'Unit Cost': t.unitCost || '', Value: Math.round(value * 100) / 100 } : {}),
+          Type: t.type || '',
+          'Supplier/Customer': t.supplier || t.customerName || '',
+          Reference: t.reason || '',
+          'Performed By': t.performedByEmail || '',
+        });
+      });
+      out.push({
+        ...blankRow(),
+        [groupLabel]: `— Subtotal: ${key} —`,
+        Quantity: groupQty,
+        ...(canSeeValue ? { Value: Math.round(groupValue * 100) / 100 } : {}),
+      });
+      grandQty += groupQty;
+      grandValue += groupValue;
+    });
+
+    out.push({
+      ...blankRow(),
+      [groupLabel]: `GRAND TOTAL (${rows.length} line${rows.length === 1 ? '' : 's'}, ${sortedKeys.length} ${groupLabel.toLowerCase()} group${sortedKeys.length === 1 ? '' : 's'})`,
+      Quantity: grandQty,
+      ...(canSeeValue ? { Value: Math.round(grandValue * 100) / 100 } : {}),
+    });
+
     download(filename, out);
   }
 
@@ -803,9 +844,9 @@ export default function Reports({ userRole }) {
         <h2 className="font-semibold text-gray-800">Inward / Outward Stock Report</h2>
         <p className="text-xs text-gray-400">
           Inward = Purchases, Returns, and any admin stock-adjustment increases. Outward = Issues, Delivery
-          Challans/Sales, and admin stock-adjustment decreases. Each exported row shows the Type(s) rolled into
-          it, so corrections are never hidden inside a plain "purchase" total. Leave dates blank to include all
-          history.
+          Challans/Sales, and admin stock-adjustment decreases. Each export lists every part line — Part Code,
+          Particulars, Quantity — grouped under its Day/Month/Year/Reference with a subtotal after each group and
+          a grand total at the end. Leave dates blank to include all history.
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <div>
