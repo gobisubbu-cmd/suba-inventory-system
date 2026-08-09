@@ -469,6 +469,30 @@ export default function Reports({ userRole, userEmail }) {
 
   // --- Warehouse Put-away reports ---
 
+  // Every location this item is ALREADY sitting in, aggregated across every
+  // put-away line's completed allocations (not just this one receipt) — so
+  // when new stock of the same item arrives, it can go straight to the same
+  // rack/shelf/bin instead of getting a new spot assigned by guesswork.
+  const existingLocationsByItem = useMemo(() => {
+    const map = {};
+    putawayLines.forEach((l) => {
+      (l.allocations || []).forEach((a) => {
+        if (!a.locationCode || !Number(a.qty)) return;
+        map[l.itemId] = map[l.itemId] || {};
+        map[l.itemId][a.locationCode] = (map[l.itemId][a.locationCode] || 0) + Number(a.qty || 0);
+      });
+    });
+    return map;
+  }, [putawayLines]);
+
+  function formatExistingLocations(itemId) {
+    const byLoc = existingLocationsByItem[itemId];
+    if (!byLoc || Object.keys(byLoc).length === 0) return '';
+    return Object.entries(byLoc)
+      .map(([code, qty]) => `${code} (${qty})`)
+      .join(', ');
+  }
+
   const exportPutawayReport = () => {
     download(
       'putaway_report.xlsx',
@@ -479,6 +503,8 @@ export default function Reports({ userRole, userEmail }) {
         'Item Code': l.itemCode,
         Description: l.description,
         'Received Quantity': l.receivedQty,
+        'Existing Stock': itemsById.get(l.itemId)?.currentStock ?? '',
+        'Existing Locations (put new stock here)': formatExistingLocations(l.itemId) || '(new item — no existing location yet)',
         'Located Quantity': l.locatedQty,
         'Pending Quantity': l.pendingQty,
         Status: l.status,
@@ -497,6 +523,8 @@ export default function Reports({ userRole, userEmail }) {
         'Item Code': l.itemCode,
         Description: l.description,
         'Received Qty': l.receivedQty,
+        'Existing Stock': itemsById.get(l.itemId)?.currentStock ?? '',
+        'Existing Locations (put new stock here)': formatExistingLocations(l.itemId) || '(new item — no existing location yet)',
         'Located Qty': l.locatedQty,
         'Pending Qty': l.pendingQty,
         'Days Pending': daysPending(l.createdAt),
@@ -941,8 +969,11 @@ export default function Reports({ userRole, userEmail }) {
           <ReportButton disabled={!dataReady} label="Bin-wise Stock" onClick={() => exportLocationWiseStock('bin')} />
         </div>
         <p className="text-xs text-gray-400">
-          For full Location History (every location change with user/date/time), see Warehouse Put-away &rarr;
-          Location History in the left menu.
+          "Put-away Report" and "Pending Location Report" now include an <strong>Existing Locations</strong> column —
+          every rack/shelf/bin this same item already has stock in, pulled from its full put-away history — so new
+          arrivals can go straight to where the item already lives instead of a new spot. Blank means it's genuinely
+          new to a location. For full Location History (every location change with user/date/time), see Warehouse
+          Put-away &rarr; Location History in the left menu.
         </p>
       </div>
 
