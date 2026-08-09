@@ -45,6 +45,8 @@ export default function Reports({ userRole }) {
   const [sparePartsUsed, setSparePartsUsed] = useState([]);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [ioStartDate, setIoStartDate] = useState('');
+  const [ioEndDate, setIoEndDate] = useState('');
 
   // Firestore's onSnapshot listeners deliver data asynchronously — if a
   // report button is clicked before the first snapshot arrives, `items`
@@ -116,6 +118,87 @@ export default function Reports({ userRole }) {
       return true;
     });
   }, [transactions, startDate, endDate]);
+
+  // Independent date range for the Inward / Outward rollup reports below —
+  // kept separate from the Date-Range Movement Report's own filter so
+  // scoping one doesn't silently change the other.
+  const ioFilteredTxns = useMemo(() => {
+    const sorted = [...transactions].sort((a, b) => (effectiveDate(b)?.getTime() || 0) - (effectiveDate(a)?.getTime() || 0));
+    if (!ioStartDate && !ioEndDate) return sorted;
+    const start = ioStartDate ? new Date(ioStartDate) : null;
+    const end = ioEndDate ? new Date(ioEndDate + 'T23:59:59') : null;
+    return sorted.filter((t) => {
+      const d = effectiveDate(t);
+      if (!d) return false;
+      if (start && d < start) return false;
+      if (end && d > end) return false;
+      return true;
+    });
+  }, [transactions, ioStartDate, ioEndDate]);
+
+  // --- Inward / Outward rollups (day / month / year / reference-number wise) ---
+  // "Inward" = every transaction whose direction is 'in' (Purchase, Return,
+  // and any admin Stock Adjustment marked increase). "Outward" = direction
+  // 'out' (Issue, Delivery Challan/Sale, and decrease adjustments). The
+  // Type(s) column on each row discloses exactly what's rolled into it, so
+  // corrections aren't silently hidden inside a "purchase" number.
+  const dayKey = (t) => {
+    const d = effectiveDate(t);
+    if (!d) return 'Unknown Date';
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const monthKey = (t) => {
+    const d = effectiveDate(t);
+    return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` : 'Unknown Month';
+  };
+  const yearKey = (t) => {
+    const d = effectiveDate(t);
+    return d ? String(d.getFullYear()) : 'Unknown Year';
+  };
+  const referenceGroupKey = (t) => (t.reason && t.reason.trim()) || '(No reference number)';
+
+  function rollupByKey(rows, keyFn) {
+    const map = new Map();
+    rows.forEach((t) => {
+      const key = keyFn(t);
+      const r = map.get(key) || { key, qty: 0, value: 0, count: 0, types: new Set(), parties: new Set(), items: new Set() };
+      r.qty += Number(t.quantity || 0);
+      r.value += Number(t.quantity || 0) * Number(t.unitCost || 0);
+      r.count += 1;
+      if (t.type) r.types.add(t.type);
+      const party = t.supplier || t.customerName || '';
+      if (party) r.parties.add(party);
+      if (t.itemName) r.items.add(t.itemName);
+      map.set(key, r);
+    });
+    return Array.from(map.values()).sort((a, b) => String(a.key).localeCompare(String(b.key)));
+  }
+
+  function exportDirectionRollup(direction, groupLabel, keyFn, filename) {
+    const rows = ioFilteredTxns.filter((t) => t.direction === direction);
+    const rollups = rollupByKey(rows, keyFn);
+    const out = rollups.map((r) => ({
+      [groupLabel]: r.key,
+      Transactions: r.count,
+      'Total Qty': r.qty,
+      ...(canSeeValue ? { 'Total Value': Math.round(r.value * 100) / 100 } : {}),
+      'Items Involved': r.items.size,
+      'Type(s)': Array.from(r.types).join(', '),
+      'Supplier/Customer': Array.from(r.parties).join(', '),
+    }));
+    const totalQty = rollups.reduce((s, r) => s + r.qty, 0);
+    const totalValue = rollups.reduce((s, r) => s + r.value, 0);
+    out.push({
+      [groupLabel]: `TOTAL (${rollups.length} ${groupLabel.toLowerCase()} group${rollups.length === 1 ? '' : 's'})`,
+      Transactions: rows.length,
+      'Total Qty': totalQty,
+      ...(canSeeValue ? { 'Total Value': Math.round(totalValue * 100) / 100 } : {}),
+      'Items Involved': '',
+      'Type(s)': '',
+      'Supplier/Customer': '',
+    });
+    download(filename, out);
+  }
 
   const lowStock = items.filter((it) => Number(it.currentStock || 0) <= Number(it.reorderLevel || 0) && Number(it.currentStock || 0) > 0);
   const outOfStock = items.filter((it) => Number(it.currentStock || 0) <= 0);
@@ -713,6 +796,46 @@ export default function Reports({ userRole }) {
               )}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow p-6 space-y-4">
+        <h2 className="font-semibold text-gray-800">Inward / Outward Stock Report</h2>
+        <p className="text-xs text-gray-400">
+          Inward = Purchases, Returns, and any admin stock-adjustment increases. Outward = Issues, Delivery
+          Challans/Sales, and admin stock-adjustment decreases. Each exported row shows the Type(s) rolled into
+          it, so corrections are never hidden inside a plain "purchase" total. Leave dates blank to include all
+          history.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+            <input type="date" value={ioStartDate} onChange={(e) => setIoStartDate(e.target.value)} className="px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+            <input type="date" value={ioEndDate} onChange={(e) => setIoEndDate(e.target.value)} className="px-3 py-2 border rounded-lg" />
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-sm font-semibold text-emerald-800 mb-2">📥 Inward (Purchases / Returns)</h3>
+          <div className="flex flex-wrap gap-3">
+            <ReportButton disabled={!dataReady} label="Day-wise" onClick={() => exportDirectionRollup('in', 'Date', dayKey, 'inward_day_wise.xlsx')} />
+            <ReportButton disabled={!dataReady} label="Month-wise" onClick={() => exportDirectionRollup('in', 'Month', monthKey, 'inward_month_wise.xlsx')} />
+            <ReportButton disabled={!dataReady} label="Year-wise" onClick={() => exportDirectionRollup('in', 'Year', yearKey, 'inward_year_wise.xlsx')} />
+            <ReportButton disabled={!dataReady} label="Reference Number-wise" onClick={() => exportDirectionRollup('in', 'Reference / Document No.', referenceGroupKey, 'inward_reference_wise.xlsx')} />
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-sm font-semibold text-amber-800 mb-2">📤 Outward (Issues / DC / Sales)</h3>
+          <div className="flex flex-wrap gap-3">
+            <ReportButton disabled={!dataReady} label="Day-wise" onClick={() => exportDirectionRollup('out', 'Date', dayKey, 'outward_day_wise.xlsx')} />
+            <ReportButton disabled={!dataReady} label="Month-wise" onClick={() => exportDirectionRollup('out', 'Month', monthKey, 'outward_month_wise.xlsx')} />
+            <ReportButton disabled={!dataReady} label="Year-wise" onClick={() => exportDirectionRollup('out', 'Year', yearKey, 'outward_year_wise.xlsx')} />
+            <ReportButton disabled={!dataReady} label="Reference Number-wise" onClick={() => exportDirectionRollup('out', 'Reference / Document No.', referenceGroupKey, 'outward_reference_wise.xlsx')} />
+          </div>
         </div>
       </div>
     </div>
