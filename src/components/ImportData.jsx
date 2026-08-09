@@ -1291,6 +1291,7 @@ function MovementImport({ existingItems, userEmail }) {
         const match = findBestMatch(r.particulars, existingItems, r.partCode);
         return {
           particulars: r.particulars,
+          partCode: r.partCode || '',
           quantity: r.quantity ?? '',
           unitCost: r.avgCost ?? '',
           itemId: match ? match.id : '',
@@ -1331,10 +1332,31 @@ function MovementImport({ existingItems, userEmail }) {
   };
 
   const updateRow = (idx, field, value) => {
-    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
-    if (field === 'itemId' && value && isReceiving) {
-      getExistingLocationsForItem(value).then((locs) => {
-        setExistingLocationsByItem((prev) => ({ ...prev, [value]: locs }));
+    let autoMatchedId = null;
+    setRows((prev) =>
+      prev.map((r, i) => {
+        if (i !== idx) return r;
+        const updated = { ...r, [field]: value };
+        // Typing/correcting the Part Code retries the match automatically —
+        // e.g. the scan missed the code on a row (came back blank, so only
+        // the fuzzy name match ran and failed), and the code is visible
+        // right on the paper document. Only auto-fills when nothing is
+        // matched yet, so it never clobbers a match someone already picked
+        // by hand in the dropdown.
+        if (field === 'partCode' && !r.itemId) {
+          const match = findBestMatch(r.particulars, existingItems, value);
+          if (match) {
+            updated.itemId = match.id;
+            autoMatchedId = match.id;
+          }
+        }
+        return updated;
+      })
+    );
+    const matchedId = field === 'itemId' ? value : autoMatchedId;
+    if (matchedId && isReceiving) {
+      getExistingLocationsForItem(matchedId).then((locs) => {
+        setExistingLocationsByItem((prev) => ({ ...prev, [matchedId]: locs }));
       });
     }
   };
@@ -1394,6 +1416,7 @@ function MovementImport({ existingItems, userEmail }) {
           const ref = doc(collection(db, 'unmatchedImports'));
           batch.set(ref, {
             extractedName: r.particulars || '',
+            partCode: r.partCode || '',
             quantity: Number(r.quantity) || 0,
             unitCost: r.unitCost ? Number(r.unitCost) : null,
             remarks: r.remarks?.trim() || '',
@@ -1585,6 +1608,7 @@ function MovementImport({ existingItems, userEmail }) {
             <thead className="bg-gray-50 border-b">
               <tr>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Extracted Name</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Part Code</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Matched Item</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Quantity</th>
                 {showUnitCost && <th className="text-left px-3 py-2 font-semibold text-gray-600">Unit Cost</th>}
@@ -1605,6 +1629,16 @@ function MovementImport({ existingItems, userEmail }) {
                       onChange={(e) => updateRow(idx, 'particulars', e.target.value)}
                       className="w-40 px-2 py-1 border rounded text-gray-700"
                       title="Correct this if the scan misread the code/name (e.g. bad handwriting)"
+                    />
+                  </td>
+                  <td className="px-2 py-1">
+                    <input
+                      type="text"
+                      value={r.partCode || ''}
+                      onChange={(e) => updateRow(idx, 'partCode', e.target.value)}
+                      placeholder="e.g. 40.05.919P"
+                      className="w-28 px-2 py-1 border rounded text-gray-700"
+                      title="Part code as printed on the document. If the scan missed it or the auto-match is wrong, type/correct it here to retry the match."
                     />
                   </td>
                   <td className="px-2 py-1">
@@ -2129,6 +2163,13 @@ function UnmatchedImportsPanel({ existingItems, userEmail }) {
     }
   };
 
+  const handlePartCodeEdit = (row, code) => {
+    if (!selections[row.id]) {
+      const match = findBestMatch(row.extractedName, existingItems, code);
+      if (match) setSelections((p) => ({ ...p, [row.id]: match.id }));
+    }
+  };
+
   const renderRow = (row, isResolved) => (
     <tr key={row.id} className="border-b last:border-0 align-top">
       <td className="px-3 py-2">
@@ -2137,6 +2178,20 @@ function UnmatchedImportsPanel({ existingItems, userEmail }) {
           {row.createdAt?.toDate ? row.createdAt.toDate().toLocaleString() : ''}
           {row.sourceLabel ? ` · ${row.sourceLabel}` : ''}
         </div>
+      </td>
+      <td className="px-3 py-2">
+        {isResolved ? (
+          row.partCode || '—'
+        ) : (
+          <input
+            type="text"
+            defaultValue={row.partCode || ''}
+            onBlur={(e) => handlePartCodeEdit(row, e.target.value)}
+            placeholder="e.g. 40.05.919P"
+            className="w-28 px-2 py-1 border rounded text-gray-700"
+            title="Part code as printed on the document. Correct it here to retry the match."
+          />
+        )}
       </td>
       <td className="px-3 py-2 text-gray-600">{DOC_TYPE_LABELS[row.movementType] || row.movementType}</td>
       <td className="px-3 py-2 text-gray-600">{row.reason || '—'}</td>
@@ -2196,6 +2251,7 @@ function UnmatchedImportsPanel({ existingItems, userEmail }) {
             <thead className="bg-gray-50 border-b">
               <tr>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Extracted Name</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Part Code</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Type</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Reference</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Supplier / Customer</th>
