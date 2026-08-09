@@ -59,11 +59,21 @@ const FIELD_ALIASES = {
 };
 
 const MOVEMENT_TYPES = [
-  { id: 'purchase', label: 'Purchase (In)', direction: 'in' },
-  { id: 'return', label: 'Return (In)', direction: 'in' },
-  { id: 'issue', label: 'Issue (Out)', direction: 'out' },
-  { id: 'dc', label: 'Delivery Challan / Sale (Out)', direction: 'out' },
+  { id: 'purchase', label: 'Purchase (In) — stock goes UP', direction: 'in' },
+  { id: 'return', label: 'Return (In) — stock goes UP', direction: 'in' },
+  { id: 'issue', label: 'Issue (Out) — stock goes DOWN', direction: 'out' },
+  { id: 'dc', label: 'Delivery Challan / Sale (Out) — stock goes DOWN', direction: 'out' },
 ];
+
+// "Delivery Challan" is just a shipping-document type — it does NOT by
+// itself mean stock is leaving. If a SUPPLIER sends you a DC, that's an
+// inward delivery for you and should be recorded as a Purchase, not a DC
+// movement. One reliable tell: the document's detected "party name" is your
+// OWN business, not an actual supplier/customer — a supplier's own DC often
+// lists your company as the "Deliver To" / consignee, which the scan can
+// mistake for the counterparty name. When that happens, warn loudly instead
+// of silently trusting the auto-detected (usually outward) direction.
+const OWN_BUSINESS_NAME_HINTS = ['suba'];
 
 function normalizeHeader(h) {
   return String(h || '').trim().toLowerCase();
@@ -1237,6 +1247,14 @@ function MovementImport({ existingItems, userEmail }) {
   const showUnitCost = movementType === 'purchase';
   const isReceiving = movement.direction === 'in';
 
+  // See OWN_BUSINESS_NAME_HINTS above — a document whose detected party
+  // name matches your own business is a strong sign this is actually an
+  // inward delivery, not the outward movement the scan assumed.
+  const partyLooksLikeOwnBusiness = Boolean(
+    detectedMeta?.partyName &&
+      OWN_BUSINESS_NAME_HINTS.some((hint) => detectedMeta.partyName.toLowerCase().includes(hint))
+  );
+
   useEffect(() => {
     setConfirmDuplicate(false);
     const key = reason.trim();
@@ -1468,12 +1486,29 @@ function MovementImport({ existingItems, userEmail }) {
           <select
             value={movementType}
             onChange={(e) => setMovementType(e.target.value)}
-            className="px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+            className={`px-3 py-2 border-2 rounded-lg focus:outline-none font-medium ${
+              isReceiving
+                ? 'border-emerald-400 bg-emerald-50 text-emerald-800'
+                : 'border-amber-400 bg-amber-50 text-amber-900'
+            }`}
           >
             {MOVEMENT_TYPES.map((m) => (
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
           </select>
+        </div>
+
+        <div
+          className={`px-4 py-2.5 rounded-lg text-sm font-semibold border-2 ${
+            isReceiving
+              ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+              : 'bg-amber-50 border-amber-300 text-amber-900'
+          }`}
+        >
+          {isReceiving
+            ? '📥 Stock will go UP — this records goods coming IN to your inventory (e.g. from a supplier).'
+            : '📤 Stock will go DOWN — this records goods going OUT of your inventory (e.g. to a customer or engineer).'}
+          {' '}If that's backwards for this document, change Movement Type above before uploading or recording.
         </div>
 
         <div className="flex flex-wrap items-center gap-4">
@@ -1557,7 +1592,27 @@ function MovementImport({ existingItems, userEmail }) {
             Detected: {DOC_TYPE_LABELS[detectedMeta.documentType] || 'Document'}
             {detectedMeta.documentNumber ? ` #${detectedMeta.documentNumber}` : ''}
             {detectedMeta.partyName ? ` — ${detectedMeta.partyName}` : ''}
-            {detectedMeta.documentType ? '. Movement Type set automatically above — change it if that\'s wrong.' : '.'}
+            {detectedMeta.documentType
+              ? `. Movement Type was set to "${movement.label}" automatically — a document TYPE alone doesn't tell us direction, so please check the ${isReceiving ? 'green (stock UP)' : 'amber (stock DOWN)'} box above matches this actual document before recording.`
+              : '.'}
+          </div>
+        )}
+
+        {detectedMeta && partyLooksLikeOwnBusiness && (
+          <div className="bg-red-50 border-2 border-red-300 text-red-800 px-4 py-3 rounded text-sm flex items-start gap-2">
+            <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold">
+                The name detected on this document ("{detectedMeta.partyName}") looks like your own business, not an
+                outside supplier or customer.
+              </p>
+              <p className="mt-1">
+                That usually means this document was addressed <strong>TO</strong> you — e.g. a supplier's own
+                Delivery Challan listing you as the consignee. If so, this is an <strong>inward</strong> delivery and
+                Movement Type above should be <strong>Purchase (In)</strong> or <strong>Return (In)</strong>, not
+                Delivery Challan / Sale (Out).
+              </p>
+            </div>
           </div>
         )}
 
@@ -1593,16 +1648,25 @@ function MovementImport({ existingItems, userEmail }) {
 
       {rows.length > 0 && (
         <div className="bg-white rounded-lg shadow overflow-x-auto">
-          <div className="flex items-center justify-between p-4 border-b">
+          <div className="flex items-center justify-between p-4 border-b flex-wrap gap-2">
             <h2 className="font-semibold text-gray-800">Review extracted rows ({rows.length})</h2>
-            <button
-              onClick={handleRecord}
-              disabled={busy || (dupMatches.length > 0 && !confirmDuplicate)}
-              title={dupMatches.length > 0 && !confirmDuplicate ? 'Confirm the duplicate-reference warning above first' : ''}
-              className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg disabled:opacity-50"
-            >
-              {busy ? 'Recording...' : `Record ${rows.length} Movement(s)`}
-            </button>
+            <div className="flex items-center gap-3">
+              <span
+                className={`text-xs font-bold px-2 py-1 rounded-full ${
+                  isReceiving ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'
+                }`}
+              >
+                {isReceiving ? 'STOCK UP' : 'STOCK DOWN'}
+              </span>
+              <button
+                onClick={handleRecord}
+                disabled={busy || (dupMatches.length > 0 && !confirmDuplicate)}
+                title={dupMatches.length > 0 && !confirmDuplicate ? 'Confirm the duplicate-reference warning above first' : ''}
+                className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg disabled:opacity-50"
+              >
+                {busy ? 'Recording...' : `Record ${rows.length} Movement(s)`}
+              </button>
+            </div>
           </div>
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
