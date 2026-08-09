@@ -1,8 +1,20 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
-import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
+import {
+  collection,
+  onSnapshot,
+  orderBy,
+  query,
+  where,
+  doc,
+  deleteDoc,
+  getDocs,
+  addDoc,
+  runTransaction,
+  serverTimestamp,
+} from 'firebase/firestore';
 import * as XLSX from 'xlsx';
-import { BarChart3, Download, Maximize2, X } from 'lucide-react';
+import { BarChart3, Download, Maximize2, X, Trash2, ShieldAlert } from 'lucide-react';
 import { daysPending, LOCATION_STATUS } from '../putaway';
 import { computeStockStatus } from '../lib/brands';
 
@@ -36,7 +48,8 @@ function download(filename, rows) {
   XLSX.writeFile(wb, filename);
 }
 
-export default function Reports({ userRole }) {
+export default function Reports({ userRole, userEmail }) {
+  const isAdmin = userRole === 'admin';
   const [items, setItems] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [putawayLines, setPutawayLines] = useState([]);
@@ -48,6 +61,10 @@ export default function Reports({ userRole }) {
   const [ioStartDate, setIoStartDate] = useState('');
   const [ioEndDate, setIoEndDate] = useState('');
   const [showMovementModal, setShowMovementModal] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteReason, setDeleteReason] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const [deleting, setDeleting] = useState(false);
 
   // Firestore's onSnapshot listeners deliver data asynchronously — if a
   // report button is clicked before the first snapshot arrives, `items`
@@ -306,6 +323,81 @@ export default function Reports({ userRole }) {
       }));
     const name = filterType ? `${filterType}_movements.xlsx` : 'all_movements.xlsx';
     download(name, rows);
+  };
+
+  // --- Delete a wrongly-recorded transaction (admin only) ---
+  // Unlike Stock Adjustment (which adds a compensating entry and keeps the
+  // original), this permanently removes the transaction itself and reverses
+  // its exact stock effect. Requested explicitly so a mistake like "recorded
+  // as outward instead of inward" can be fully undone instead of leaving two
+  // offsetting entries in the ledger forever. Guards against leaving stock
+  // negative, cleans up any put-away line it created, and — since erasing
+  // the record entirely removes all trace of it — leaves one minimal entry
+  // in a separate deletedTransactionsLog so there's still an answer to
+  // "did something get deleted here, by whom, and why" if that's ever asked.
+  const confirmDeleteTransaction = async () => {
+    if (!deleteTarget) return;
+    if (!deleteReason.trim()) {
+      setDeleteError('A reason is required before deleting.');
+      return;
+    }
+    setDeleting(true);
+    setDeleteError('');
+    const t = deleteTarget;
+    try {
+      await runTransaction(db, async (tx) => {
+        const itemRef = doc(db, 'items', t.itemId);
+        const itemSnap = await tx.get(itemRef);
+        if (!itemSnap.exists()) {
+          throw new Error('The item this transaction belongs to no longer exists — cannot safely reverse stock.');
+        }
+        const current = Number(itemSnap.data().currentStock || 0);
+        // Reversing an inward movement means removing what it added;
+        // reversing an outward movement means putting back what it removed.
+        const delta = t.direction === 'in' ? -Number(t.quantity || 0) : Number(t.quantity || 0);
+        const newStock = current + delta;
+        if (newStock < 0) {
+          throw new Error(
+            `Can't delete this — reversing it would make "${t.itemName}" stock negative (current stock ${current}). Some of this quantity may already have been issued or sold elsewhere. Use Stock Adjustment to investigate and correct the balance instead.`
+          );
+        }
+        tx.update(itemRef, { currentStock: newStock, updatedAt: serverTimestamp() });
+        tx.delete(doc(db, 'transactions', t.id));
+      });
+
+      // Best-effort cleanup of any put-away line this transaction created —
+      // otherwise a "LOCATION PENDING" line would be left pointing at a
+      // transaction that no longer exists.
+      try {
+        const pq = query(collection(db, 'putawayLines'), where('transactionId', '==', t.id));
+        const psnap = await getDocs(pq);
+        await Promise.all(psnap.docs.map((d) => deleteDoc(doc(db, 'putawayLines', d.id))));
+      } catch (e) {
+        // Non-fatal — the main deletion already succeeded.
+      }
+
+      await addDoc(collection(db, 'deletedTransactionsLog'), {
+        originalTransactionId: t.id,
+        itemId: t.itemId,
+        itemName: t.itemName,
+        type: t.type,
+        direction: t.direction,
+        quantity: t.quantity,
+        reference: t.reason || '',
+        transactionDate: t.transactionDate || '',
+        originallyPerformedByEmail: t.performedByEmail || '',
+        deletedByEmail: userEmail || '',
+        deleteReason: deleteReason.trim(),
+        deletedAt: serverTimestamp(),
+      });
+
+      setDeleteTarget(null);
+      setDeleteReason('');
+    } catch (err) {
+      setDeleteError(err.message);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   // --- Warehouse Put-away reports ---
@@ -850,6 +942,7 @@ export default function Reports({ userRole }) {
                     <th className="text-right px-4 py-3 font-semibold text-gray-600">Qty</th>
                     <th className="text-left px-4 py-3 font-semibold text-gray-600">Reason / Reference</th>
                     <th className="text-left px-4 py-3 font-semibold text-gray-600">By</th>
+                    {isAdmin && <th className="text-center px-4 py-3 font-semibold text-gray-600">Delete</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -862,15 +955,95 @@ export default function Reports({ userRole }) {
                       <td className="px-4 py-3 text-right">{t.quantity}</td>
                       <td className="px-4 py-3">{t.reason}</td>
                       <td className="px-4 py-3">{t.performedByEmail}</td>
+                      {isAdmin && (
+                        <td className="px-4 py-3 text-center">
+                          <button
+                            onClick={() => {
+                              setDeleteTarget(t);
+                              setDeleteReason('');
+                              setDeleteError('');
+                            }}
+                            title="Permanently delete this transaction and reverse its stock effect"
+                            className="text-red-600 hover:text-white hover:bg-red-600 border border-red-300 rounded-lg p-1.5 transition-colors"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                   {filteredTxns.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="px-4 py-8 text-center text-gray-400">No transactions in range.</td>
+                      <td colSpan={isAdmin ? 8 : 7} className="px-4 py-8 text-center text-gray-400">No transactions in range.</td>
                     </tr>
                   )}
                 </tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4"
+          onClick={() => (deleting ? null : setDeleteTarget(null))}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl w-full max-w-lg flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 px-6 py-4 border-b">
+              <ShieldAlert className="text-red-600" size={22} />
+              <h3 className="font-semibold text-gray-800 text-lg">Delete Transaction</h3>
+            </div>
+            <div className="px-6 py-4 space-y-3">
+              <div className="bg-gray-50 border rounded-lg px-4 py-3 text-sm space-y-1">
+                <p><span className="text-gray-500">Item:</span> <span className="font-medium">{deleteTarget.itemName}</span></p>
+                <p><span className="text-gray-500">Type:</span> <span className="capitalize">{deleteTarget.type} ({deleteTarget.direction})</span></p>
+                <p><span className="text-gray-500">Quantity:</span> {deleteTarget.quantity}</p>
+                <p><span className="text-gray-500">Date:</span> {deleteTarget.transactionDate || effectiveDate(deleteTarget)?.toLocaleDateString() || ''}</p>
+                <p><span className="text-gray-500">Reference:</span> {deleteTarget.reason || '(none)'}</p>
+                <p><span className="text-gray-500">Recorded by:</span> {deleteTarget.performedByEmail}</p>
+              </div>
+              <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+                This permanently deletes the transaction and reverses its stock effect
+                ({deleteTarget.direction === 'in'
+                  ? `removes ${deleteTarget.quantity} from current stock`
+                  : `adds ${deleteTarget.quantity} back to current stock`}
+                ). This cannot be undone from within the app. A minimal log (who, when, why) is kept separately so
+                there's still a trace that a deletion happened.
+              </p>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Reason for deleting *</label>
+                <input
+                  type="text"
+                  value={deleteReason}
+                  onChange={(e) => setDeleteReason(e.target.value)}
+                  placeholder="e.g. Recorded as outward by mistake — was actually an inward delivery"
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-red-500"
+                  autoFocus
+                />
+              </div>
+              {deleteError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm">{deleteError}</div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                className="px-4 py-2 rounded-lg border text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDeleteTransaction}
+                disabled={deleting}
+                className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold disabled:opacity-50"
+              >
+                {deleting ? 'Deleting...' : 'Permanently Delete'}
+              </button>
             </div>
           </div>
         </div>
