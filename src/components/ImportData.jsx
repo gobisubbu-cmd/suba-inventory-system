@@ -1317,12 +1317,33 @@ function MovementImport({ existingItems, userEmail }) {
         };
       });
       setRows(withMatches);
-      setDetectedMeta(meta);
       // Auto-pick the movement type and pre-fill reference/party from what
       // was detected in the document — the person can still override both.
+      //
+      // A document TYPE alone (e.g. "Delivery Challan") never actually says
+      // which direction stock is moving — a supplier's own DC addressed to
+      // us is inbound, not outbound. The one reliable signal we have before
+      // any human looks at it is the detected party name: if it matches our
+      // OWN business, this was almost certainly addressed TO us, so flip
+      // the auto-selected outward type to its inward equivalent instead of
+      // just warning about it after the fact — this exact mistake (RATIONAL
+      // packing lists auto-set to "Delivery Challan / Sale (Out)") has
+      // repeatedly caused wrong stock-outs, so don't rely on someone
+      // catching the warning banner every single time.
+      let effectiveDocType = meta?.documentType || null;
+      let autoCorrectedFrom = null;
       if (meta?.documentType && MOVEMENT_TYPES.some((m) => m.id === meta.documentType)) {
-        setMovementType(meta.documentType);
+        const partyLooksOwn = Boolean(
+          meta.partyName && OWN_BUSINESS_NAME_HINTS.some((hint) => meta.partyName.toLowerCase().includes(hint))
+        );
+        const outwardToInward = { dc: 'purchase', issue: 'return' };
+        if (partyLooksOwn && outwardToInward[meta.documentType]) {
+          autoCorrectedFrom = meta.documentType;
+          effectiveDocType = outwardToInward[meta.documentType];
+        }
+        setMovementType(effectiveDocType);
       }
+      setDetectedMeta(meta ? { ...meta, autoCorrectedFrom } : meta);
       if (meta?.documentNumber) {
         setReason(meta.documentNumber);
       }
@@ -1611,7 +1632,21 @@ function MovementImport({ existingItems, userEmail }) {
           </div>
         )}
 
-        {detectedMeta && partyLooksLikeOwnBusiness && (
+        {detectedMeta && detectedMeta.autoCorrectedFrom && (
+          <div className="bg-emerald-50 border-2 border-emerald-300 text-emerald-800 px-4 py-3 rounded text-sm flex items-start gap-2">
+            <CheckCircle2 size={18} className="shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold">
+                Auto-corrected: the document said "{DOC_TYPE_LABELS[detectedMeta.autoCorrectedFrom]}", but the party
+                name detected ("{detectedMeta.partyName}") is your own business — so this was addressed{' '}
+                <strong>TO</strong> you, not sent by you. Movement Type has been set to{' '}
+                <strong>{movement.label}</strong> instead. Please still confirm this is right before recording.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {detectedMeta && partyLooksLikeOwnBusiness && !detectedMeta.autoCorrectedFrom && (
           <div className="bg-red-50 border-2 border-red-300 text-red-800 px-4 py-3 rounded text-sm flex items-start gap-2">
             <AlertTriangle size={18} className="shrink-0 mt-0.5" />
             <div>
