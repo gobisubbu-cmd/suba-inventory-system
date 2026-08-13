@@ -39,21 +39,20 @@
 //     backward compatibility with any existing snapshots/tooling.
 //   - every other collection gets dailyBackups/{date}/chunks_{collectionName}/{n}
 //     (e.g. dailyBackups/{date}/chunks_transactions/{n}).
-// The dailyBackups/{date} summary doc itself keeps its original top-level
-// fields (itemCount, chunkCount, totalStockValue, brandCounts) so anything
-// that already reads those still works, and adds a new `collections` map
-// with a {count, chunkCount} entry per collection backed up that day.
 //
-// Only one backup runs per day, total — not once per collection. The
-// localStorage flag and the systemMeta/backupStatus.lastBackupDate doc both
-// gate the whole multi-collection run as a single unit, exactly as before.
-//
-// EmailJS is a client-side email service — no backend server or SMTP
-// password required. The three IDs below are meant to be public (EmailJS
-// scopes/rate-limits by them, similar to how a Firebase apiKey is public),
-// so it's safe to commit them here once the free EmailJS account is set up.
-// Leave them blank and the Firestore backup still runs every day — only the
-// email step is skipped.
+// RESUMABLE ACROSS SESSIONS (added 13 Aug 2026, live-verified need): backing
+// up 18 collections with generous timeouts/retries can genuinely take longer
+// than most people leave a browser tab open doing nothing. So this no longer
+// requires one unbroken session to finish. systemMeta/backupStatus tracks
+// completedCollections: { [collectionName]: true } and is updated the moment
+// EACH collection finishes — not just at the very end. Every time this runs,
+// it skips whatever's already marked done for today and only works on what's
+// left. Progress accumulates across however many times the app gets opened,
+// instead of restarting from zero and racing the clock every time. The
+// localStorage "don't bother checking today" shortcut is only set once every
+// single collection is confirmed done for today. If one collection keeps
+// failing after all its retries, it's logged and skipped for THIS run so the
+// rest of the list still gets a chance — next run tries the failed one again.
 import { collection, doc, getDoc, getDocs, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
 import { db } from './firebase';
 
@@ -224,49 +223,106 @@ export async function runDailyBackupIfNeeded() {
   if (typeof window === 'undefined') return;
   window.__backupDebug = { status: 'starting', today };
   if (window.localStorage.getItem(LOCAL_KEY) === today) {
-    window.__backupDebug.status = 'skipped-localstorage';
+    window.__backupDebug.status = 'skipped-localstorage-fully-done';
     return;
   }
 
+  const statusRef = doc(db, 'systemMeta', 'backupStatus');
+
   try {
     window.__backupDebug.status = 'checking-status-doc';
-    const statusRef = doc(db, 'systemMeta', 'backupStatus');
-    const statusSnap = await getDoc(statusRef);
-    if (statusSnap.exists() && statusSnap.data().lastBackupDate === today) {
+    const statusSnap = await withTimeout(() => getDoc(statusRef), READ_TIMEOUT_MS, 'read backupStatus');
+    const statusData = statusSnap.exists() ? statusSnap.data() : {};
+
+    // What's already done TODAY specifically — a completedCollections map
+    // from a previous, different day is irrelevant and must not carry over.
+    const alreadyDoneToday =
+      statusData.lastBackupDate === today && statusData.completedCollections
+        ? statusData.completedCollections
+        : {};
+
+    if (COLLECTIONS_TO_BACKUP.every((name) => alreadyDoneToday[name])) {
       window.localStorage.setItem(LOCAL_KEY, today);
-      window.__backupDebug.status = 'skipped-already-done-today';
+      window.__backupDebug.status = 'skipped-already-fully-done-today';
       return;
     }
 
-    // One backup run covers every collection in COLLECTIONS_TO_BACKUP; the
-    // localStorage flag and statusRef.lastBackupDate above gate this whole
-    // run as a single unit, so this still only happens once per day total —
-    // never once per collection.
-    const collectionCounts = {};
-    let itemCount = 0;
-    let totalStockValue = 0;
-    let brandCounts = {};
+    const remaining = COLLECTIONS_TO_BACKUP.filter((name) => !alreadyDoneToday[name]);
+    window.__backupDebug.status = `resuming-${remaining.length}-of-${COLLECTIONS_TO_BACKUP.length}-collections-left`;
 
-    for (const collectionName of COLLECTIONS_TO_BACKUP) {
+    // Carry forward stats from collections already backed up in an earlier
+    // session today (needed for the items-derived stock-value/brand stats
+    // and for the final summary doc to stay accurate even when 'items' was
+    // done in a previous session, not this one).
+    const collectionCounts = { ...(statusData.collections || {}) };
+    let itemCount = statusData.itemCount || 0;
+    let totalStockValue = statusData.totalStockValue || 0;
+    let brandCounts = statusData.brandCounts || {};
+
+    for (const collectionName of remaining) {
       window.__backupDebug.status = `fetching-${collectionName}`;
-      const { docs, count, chunkCount } = await backupOneCollection(today, collectionName, window.__backupDebug);
-      collectionCounts[collectionName] = { count, chunkCount };
+      try {
+        const { docs, count, chunkCount } = await backupOneCollection(today, collectionName, window.__backupDebug);
+        collectionCounts[collectionName] = { count, chunkCount };
 
-      if (collectionName === 'items') {
-        itemCount = count;
-        docs.forEach((it) => {
-          const stock = Number(it.currentStock) || 0;
-          const cost = Number(it.avgCost || it.purchaseCost) || 0;
-          totalStockValue += stock * cost;
-          const brand = it.brand || 'Unassigned';
-          brandCounts[brand] = (brandCounts[brand] || 0) + 1;
-        });
+        if (collectionName === 'items') {
+          itemCount = count;
+          totalStockValue = 0;
+          brandCounts = {};
+          docs.forEach((it) => {
+            const stock = Number(it.currentStock) || 0;
+            const cost = Number(it.avgCost || it.purchaseCost) || 0;
+            totalStockValue += stock * cost;
+            const brand = it.brand || 'Unassigned';
+            brandCounts[brand] = (brandCounts[brand] || 0) + 1;
+          });
+        }
+
+        // Persist progress the moment THIS collection finishes, not just at
+        // the very end — so if the tab closes before the loop is done, this
+        // collection is never re-fetched/re-written next time; only what's
+        // still missing gets attempted.
+        window.__backupDebug.status = `saving-progress-after-${collectionName}`;
+        await withTimeout(
+          () =>
+            setDoc(
+              statusRef,
+              {
+                lastBackupDate: today,
+                itemCount,
+                totalStockValue,
+                brandCounts,
+                collections: collectionCounts,
+                [`completedCollections.${collectionName}`]: true,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            ),
+          WRITE_TIMEOUT_MS,
+          `save progress (${collectionName})`
+        );
+      } catch (err) {
+        // This collection failed even after all its internal retries. Log it
+        // and move on to the next collection instead of aborting the whole
+        // run — partial progress across 17 collections is far better than
+        // none, and the next session will retry just this one.
+        window.__backupDebug.status = `failed-${collectionName}: ${err.message}`;
+        console.error(`Daily backup: ${collectionName} failed after all retries, will retry next session:`, err);
       }
     }
 
-    window.__backupDebug.status = 'writing-summary';
-    window.__backupDebug.collectionCounts = collectionCounts;
+    // Re-check completion status fresh (covers collections finished in
+    // earlier sessions today plus whatever just succeeded above).
+    const nowDoneSnap = await withTimeout(() => getDoc(statusRef), READ_TIMEOUT_MS, 'read backupStatus (final check)');
+    const nowDone = nowDoneSnap.exists() ? nowDoneSnap.data().completedCollections || {} : {};
+    const fullyComplete = COLLECTIONS_TO_BACKUP.every((name) => nowDone[name]);
 
+    if (!fullyComplete) {
+      window.__backupDebug.status = 'partial-progress-saved-will-resume-next-session';
+      return;
+    }
+
+    window.__backupDebug.status = 'writing-summary';
     await setDoc(doc(db, 'dailyBackups', today), {
       date: today,
       // Top-level fields kept for backward compatibility with anything that
@@ -280,17 +336,7 @@ export async function runDailyBackupIfNeeded() {
       createdAt: serverTimestamp(),
     });
 
-    await setDoc(
-      statusRef,
-      {
-        lastBackupDate: today,
-        itemCount,
-        totalStockValue,
-        collections: collectionCounts,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+    await setDoc(statusRef, { status: 'complete', updatedAt: serverTimestamp() }, { merge: true });
 
     window.localStorage.setItem(LOCAL_KEY, today);
     window.__backupDebug.status = 'success';
