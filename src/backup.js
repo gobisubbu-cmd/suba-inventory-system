@@ -61,6 +61,17 @@ const LOCAL_KEY = 'subaLastBackupDate';
 const ITEMS_PER_CHUNK = 300; // keeps each backup doc well under Firestore's 1MB-per-doc limit
 const CHUNK_DOCS_PER_BATCH = 20; // well under writeBatch's 400-operation limit
 
+// Live-verified (13 Aug 2026): a 15s timeout was too impatient — the first
+// batch of 20 chunk-writes genuinely completed, just slower than 15s, and a
+// later batch then failed the same way. The write path itself works; it just
+// sometimes needs more time. So: longer timeouts, plus automatic retries
+// (each chunk doc has a fixed, deterministic path, so re-running batch.set on
+// the same ids is safe to retry — it just overwrites with identical data).
+const READ_TIMEOUT_MS = 30000;
+const WRITE_TIMEOUT_MS = 45000;
+const MAX_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = 2000;
+
 // Every real business-data collection this app writes to during normal use.
 // Deliberately excludes "dailyBackups" (the backup's own output) and
 // "systemMeta" (backup bookkeeping only) — backing those up would be
@@ -103,27 +114,50 @@ function chunkSubcollectionFor(collectionName) {
   return collectionName === 'items' ? 'chunks' : `chunks_${collectionName}`;
 }
 
+// Races any promise-returning function against a timeout, labelled for
+// error messages / debug status.
+function withTimeout(promiseFactory, timeoutMs, label) {
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs / 1000}s`)), timeoutMs)
+  );
+  return Promise.race([promiseFactory(), timeoutPromise]);
+}
+
+// Retries a timeout-wrapped step up to MAX_ATTEMPTS times with a short fixed
+// backoff between attempts. Safe to retry here specifically because every
+// write below targets a fixed, deterministic document path (chunk index) —
+// re-running it just overwrites with identical data, never duplicates.
+async function withRetries(fn, label, debugRef) {
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (debugRef) debugRef.status = `${label}-attempt-${attempt}-failed: ${err.message}`;
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 // Reads one live collection in full and writes it into its own chunked
 // sub-path under dailyBackups/{date}, using the exact same chunk-size /
 // batch-size / commit-timeout safety pattern for every collection. Read-only
 // against the live collection — the only writes here are under dailyBackups.
+// Both the read and every write batch are timeout-protected AND retried
+// (see withTimeout/withRetries above) — live testing on 13 Aug 2026 showed
+// the underlying reads/writes genuinely work, they just occasionally need
+// more than a few seconds, so failing fast once isn't enough; this gives
+// each step several chances with real breathing room before giving up.
 async function backupOneCollection(today, collectionName, debugRef) {
-  // The read itself is now timeout-protected too — previously only the
-  // write (batch.commit()) below had a race against a timeout, so a hang
-  // on the READ side (e.g. offline-persistence cache contention, a stalled
-  // network request that never errors) could block this function forever
-  // with no way for the outer try/catch to ever catch anything. That
-  // asymmetry is the leading suspect for the "batch.commit() never
-  // resolved or rejected" hang seen in earlier testing — the hang may
-  // actually have started here, one step before the part that got blamed.
-  const readPromise = getDocs(collection(db, collectionName));
-  const readTimeoutPromise = new Promise((_, reject) =>
-    setTimeout(
-      () => reject(new Error(`read timed out after 20s (${collectionName})`)),
-      20000
-    )
+  const snap = await withRetries(
+    () => withTimeout(() => getDocs(collection(db, collectionName)), READ_TIMEOUT_MS, `read (${collectionName})`),
+    `read-${collectionName}`,
+    debugRef
   );
-  const snap = await Promise.race([readPromise, readTimeoutPromise]);
   const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
   const chunks = [];
@@ -134,19 +168,24 @@ async function backupOneCollection(today, collectionName, debugRef) {
   const subcollection = chunkSubcollectionFor(collectionName);
   for (let i = 0; i < chunks.length; i += CHUNK_DOCS_PER_BATCH) {
     if (debugRef) debugRef.status = `writing-${collectionName}-batch-starting-at-${i}`;
-    const batch = writeBatch(db);
-    chunks.slice(i, i + CHUNK_DOCS_PER_BATCH).forEach((chunkDocs, offset) => {
-      const chunkRef = doc(db, 'dailyBackups', today, subcollection, String(i + offset));
-      batch.set(chunkRef, { items: chunkDocs });
-    });
-    const commitPromise = batch.commit();
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(
-        () => reject(new Error(`commit timed out after 15s (${collectionName}, batch starting ${i})`)),
-        15000
-      )
+    const batchChunks = chunks.slice(i, i + CHUNK_DOCS_PER_BATCH);
+    await withRetries(
+      () =>
+        withTimeout(
+          () => {
+            const batch = writeBatch(db);
+            batchChunks.forEach((chunkDocs, offset) => {
+              const chunkRef = doc(db, 'dailyBackups', today, subcollection, String(i + offset));
+              batch.set(chunkRef, { items: chunkDocs });
+            });
+            return batch.commit();
+          },
+          WRITE_TIMEOUT_MS,
+          `commit (${collectionName}, batch starting ${i})`
+        ),
+      `write-${collectionName}-batch-${i}`,
+      debugRef
     );
-    await Promise.race([commitPromise, timeoutPromise]);
   }
 
   return { docs, count: docs.length, chunkCount: chunks.length };
