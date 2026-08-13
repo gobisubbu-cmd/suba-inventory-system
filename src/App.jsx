@@ -28,7 +28,7 @@ import EngineerIssueReturn from './components/EngineerIssueReturn';
 import FieldMode from './components/FieldMode';
 import MobileQuickScan from './components/MobileQuickScan';
 import MobileEngineerIssue from './components/MobileEngineerIssue';
-// import { runDailyBackupIfNeeded } from './backup'; // see note below — temporarily disabled
+import { runDailyBackupIfNeeded } from './backup';
 import './index.css';
 
 export default function App() {
@@ -75,18 +75,24 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // Daily stock safety-backup — TEMPORARILY DISABLED.
-  // The write step (src/backup.js) was hanging indefinitely during testing
-  // (batch.commit() never resolved or rejected) for a reason not yet fully
-  // root-caused. It's non-blocking and wrapped defensively, so leaving it on
-  // would not break the app for normal use, but "silently never backs up"
-  // isn't good enough for a safety feature — re-enable only after this is
-  // understood and verified working end-to-end.
-  // useEffect(() => {
-  //   if (user) {
-  //     runDailyBackupIfNeeded();
-  //   }
-  // }, [user]);
+  // Daily stock safety-backup — RE-ENABLED.
+  // Earlier testing saw this hang indefinitely (reported as batch.commit()
+  // never resolving/rejecting). Root cause fix: the READ step (getDocs) had
+  // no timeout at all, unlike the write step which already raced against a
+  // 15s timeout — so a stall there could hang forever with nothing able to
+  // catch it. The read is now timeout-protected the same way (20s), so
+  // every async step in the backup is bounded and will fail loudly instead
+  // of hanging, even for collections that error out. It's also still fully
+  // non-blocking (this effect never touches `loading`) and wrapped in its
+  // own try/catch, so worst case is a failed backup, never a broken app.
+  // To verify a run actually completed, check window.__backupDebug.status
+  // in the browser console — it should progress through
+  // fetching-<collection>/writing-<collection>-... and land on 'success'.
+  useEffect(() => {
+    if (user) {
+      runDailyBackupIfNeeded();
+    }
+  }, [user]);
 
   if (loading) {
     return (
