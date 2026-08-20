@@ -11,7 +11,7 @@ import {
   runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
-import { Boxes, Plus, Pencil, ArrowLeftRight, X, Search } from 'lucide-react';
+import { Boxes, Plus, Pencil, Copy, ArrowLeftRight, X, Search } from 'lucide-react';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
 import { createPutawayLine } from '../putaway';
 import { fetchBrands, ensureSeedBrands, computeStockStatus, STOCK_STATUS_STYLES, matchesSearch } from '../lib/brands';
@@ -111,6 +111,40 @@ export default function ManageItems({ userRole }) {
       description: item.description || '',
       partNumber: item.partNumber || item.partCode || '',
       oldPartNumbers: (item.oldPartNumbers || []).join(', '),
+      machineModels: item.machineModels || '',
+      category: item.category || '',
+      unit: item.unit || '',
+      supplier: item.supplier || '',
+      purchaseCost: item.purchaseCost ?? '',
+      sellingPrice: item.sellingPrice ?? '',
+      rackNo: item.rackNo || '',
+      minStock: item.minStock ?? '',
+      maxStock: item.maxStock ?? '',
+      reorderLevel: item.reorderLevel ?? '',
+      hsnCode: item.hsnCode || '',
+      avgCost: item.avgCost ?? '',
+      openingStock: '',
+      masterOnly: Boolean(item.masterOnly),
+      remarks: item.remarks || '',
+    });
+    setError('');
+    setShowForm(true);
+  };
+
+  // Clone reuses the Add form (editingItem stays null so Save creates a new
+  // document) but pre-fills every field from the source item. Stock-specific
+  // fields — current stock, S.No — are intentionally NOT carried over since
+  // those belong to this one physical item, not the new one being created.
+  // The name gets a "(Copy)" suffix so it doesn't immediately collide with
+  // the duplicate-name check; the user is expected to adjust it before saving.
+  const openClone = (item) => {
+    setEditingItem(null);
+    setForm({
+      brand: item.brand || '',
+      particulars: item.particulars ? `${item.particulars} (Copy)` : '',
+      description: item.description || '',
+      partNumber: '',
+      oldPartNumbers: '',
       machineModels: item.machineModels || '',
       category: item.category || '',
       unit: item.unit || '',
@@ -331,6 +365,9 @@ export default function ManageItems({ userRole }) {
                     <div className="flex items-center gap-2">
                       <button onClick={() => openEdit(it)} className="text-gray-500 hover:text-emerald-700" title="Edit">
                         <Pencil size={16} />
+                      </button>
+                      <button onClick={() => openClone(it)} className="text-gray-500 hover:text-emerald-700" title="Clone">
+                        <Copy size={16} />
                       </button>
                       <button
                         onClick={() => setMovementItem(it)}

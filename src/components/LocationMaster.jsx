@@ -10,7 +10,7 @@ import {
   doc,
   serverTimestamp,
 } from 'firebase/firestore';
-import { Warehouse, Plus, Pencil, X, ShieldAlert } from 'lucide-react';
+import { Warehouse, Plus, Pencil, Copy, X, ShieldAlert } from 'lucide-react';
 
 function buildLocationCode({ rack, shelf, bin }) {
   return [rack, shelf, bin].filter(Boolean).join('-').toUpperCase();
@@ -62,6 +62,25 @@ export default function LocationMaster({ userRole }) {
       status: loc.status || 'ACTIVE',
     });
     setEditingLoc(loc);
+    setError('');
+    setShowForm(true);
+  };
+
+  // Clone reuses the Add form (editingLoc stays null so Save creates a new
+  // location doc) pre-filled from an existing one. Bin is left blank since
+  // warehouse+rack+shelf+bin together must be unique — leaving bin empty
+  // forces the user to fill in something that makes the new location code
+  // distinct before it will save.
+  const openClone = (loc) => {
+    setForm({
+      warehouse: loc.warehouse || '',
+      rack: loc.rack || '',
+      shelf: loc.shelf || '',
+      bin: '',
+      maxCapacity: loc.maxCapacity ?? '',
+      status: loc.status || 'ACTIVE',
+    });
+    setEditingLoc(null);
     setError('');
     setShowForm(true);
   };
@@ -279,9 +298,14 @@ export default function LocationMaster({ userRole }) {
                   </td>
                   {canEdit && (
                     <td className="px-4 py-3">
-                      <button onClick={() => openEdit(l)} className="text-gray-400 hover:text-emerald-700">
-                        <Pencil size={16} />
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => openEdit(l)} className="text-gray-400 hover:text-emerald-700" title="Edit">
+                          <Pencil size={16} />
+                        </button>
+                        <button onClick={() => openClone(l)} className="text-gray-400 hover:text-emerald-700" title="Clone">
+                          <Copy size={16} />
+                        </button>
+                      </div>
                     </td>
                   )}
                 </tr>

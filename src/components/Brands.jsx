@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { db, auth } from '../firebase';
-import { collection, onSnapshot, addDoc, query, orderBy, serverTimestamp } from 'firebase/firestore';
-import { Tag, Plus } from 'lucide-react';
+import { collection, onSnapshot, addDoc, updateDoc, doc, query, orderBy, serverTimestamp } from 'firebase/firestore';
+import { Tag, Plus, Pencil, Copy, X } from 'lucide-react';
 import { computeStockStatus } from '../lib/brands';
 
 export default function Brands({ userRole, onSelectBrand }) {
@@ -9,6 +9,14 @@ export default function Brands({ userRole, onSelectBrand }) {
   const [items, setItems] = useState([]);
   const [newBrand, setNewBrand] = useState('');
   const [error, setError] = useState('');
+  // Edit (rename) uses its own small modal rather than the inline "Add
+  // Brand" field, since renaming an existing brand is a different action
+  // from creating one. Clone re-uses the inline Add field — it just
+  // pre-fills it with "<name> (Copy)" so the user tweaks and submits it
+  // through the normal Add Brand flow.
+  const [editingBrand, setEditingBrand] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [editError, setEditError] = useState('');
   const canEdit = userRole === 'admin' || userRole === 'inventory_manager';
 
   useEffect(() => {
@@ -56,6 +64,37 @@ export default function Brands({ userRole, onSelectBrand }) {
     setNewBrand('');
   };
 
+  const openEdit = (brand) => {
+    setEditingBrand(brand);
+    setEditName(brand.name);
+    setEditError('');
+  };
+
+  const openClone = (brand) => {
+    setNewBrand(`${brand.name} (Copy)`);
+    setError('');
+  };
+
+  const handleRename = async (e) => {
+    e.preventDefault();
+    setEditError('');
+    const name = editName.trim().toUpperCase();
+    if (!name) {
+      setEditError('Brand name is required.');
+      return;
+    }
+    if (brands.some((b) => b.name.toUpperCase() === name && b.id !== editingBrand.id)) {
+      setEditError('That brand already exists.');
+      return;
+    }
+    try {
+      await updateDoc(doc(db, 'brands', editingBrand.id), { name });
+      setEditingBrand(null);
+    } catch (err) {
+      setEditError(err.message);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -94,6 +133,7 @@ export default function Brands({ userRole, onSelectBrand }) {
               <th className="text-right px-4 py-3 font-semibold text-gray-600">Physically Stocked</th>
               <th className="text-right px-4 py-3 font-semibold text-gray-600">Not Stocked (Catalogue only)</th>
               <th className="text-right px-4 py-3 font-semibold text-gray-600">Inventory Value</th>
+              {canEdit && <th className="px-4 py-3"></th>}
             </tr>
           </thead>
           <tbody>
@@ -114,15 +154,64 @@ export default function Brands({ userRole, onSelectBrand }) {
                   <td className="px-4 py-3 text-right">{s.stocked}</td>
                   <td className="px-4 py-3 text-right">{s.notStocked}</td>
                   <td className="px-4 py-3 text-right">₹{s.value.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</td>
+                  {canEdit && (
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => openEdit(b)} className="text-gray-400 hover:text-emerald-700" title="Edit">
+                          <Pencil size={16} />
+                        </button>
+                        <button onClick={() => openClone(b)} className="text-gray-400 hover:text-emerald-700" title="Clone">
+                          <Copy size={16} />
+                        </button>
+                      </div>
+                    </td>
+                  )}
                 </tr>
               );
             })}
             {brands.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No brands yet.</td></tr>
+              <tr><td colSpan={canEdit ? 6 : 5} className="px-4 py-8 text-center text-gray-400">No brands yet.</td></tr>
             )}
           </tbody>
         </table>
       </div>
+
+      {editingBrand && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold text-gray-800">Edit Brand</h2>
+              <button onClick={() => setEditingBrand(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={20} />
+              </button>
+            </div>
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3">
+              Renaming only changes this brand entry. Items already saved under the old name will keep showing
+              the old name until each one is opened and re-saved.
+            </p>
+            {editError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded mb-3 text-sm">{editError}</div>
+            )}
+            <form onSubmit={handleRename} className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Brand Name</label>
+                <input
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value.toUpperCase())}
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
+                  autoFocus
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg"
+              >
+                Save Changes
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

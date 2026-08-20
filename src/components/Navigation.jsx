@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { signOut } from 'firebase/auth';
 import { auth } from '../firebase';
-import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat, Smartphone } from 'lucide-react';
+import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat, Smartphone, Database, ChevronDown, ChevronRight } from 'lucide-react';
 
 const ROLE_LABELS = {
   staff: 'STAFF',
@@ -18,12 +18,9 @@ export default function Navigation({ currentView, onViewChange, userRole, userNa
     { id: 'dashboard', label: 'Dashboard', icon: Home, show: true },
     { id: 'overview', label: 'Overview', icon: LayoutDashboard, show: true },
     { id: 'reorder', label: 'Reorder Items', icon: ClipboardList, show: true },
-    { id: 'brands', label: 'Brands', icon: Tag, show: true },
-    { id: 'items', label: 'Manage Items', icon: Boxes, show: userRole === 'admin' || userRole === 'inventory_manager' },
     { id: 'import', label: 'Import Data', icon: ScanLine, show: userRole === 'admin' || userRole === 'inventory_manager' },
     { id: 'engineers', label: 'Engineer Issue/Return', icon: HardHat, show: true },
     { id: 'warehouse', label: 'Warehouse Put-away', icon: PackageCheck, show: true },
-    { id: 'locations', label: 'Location Master', icon: Warehouse, show: userRole === 'admin' || userRole === 'inventory_manager' },
     { id: 'adjustment', label: 'Stock Adjustment', icon: SlidersHorizontal, show: userRole === 'admin' },
     { id: 'sparesearch', label: 'Spare Search', icon: PackageSearch, show: true },
     { id: 'audit', label: 'Audit Dashboard', icon: ShieldCheck, show: userRole === 'admin' },
@@ -34,6 +31,27 @@ export default function Navigation({ currentView, onViewChange, userRole, userNa
     { id: 'settings', label: 'Settings', icon: SettingsIcon, show: userRole === 'admin' },
     { id: 'danger', label: 'Danger Zone', icon: AlertTriangle, show: userRole === 'admin' },
   ];
+
+  // "Master Data" is its own collapsible group rather than flat menu items —
+  // these three pages (Items, Brands, Locations) are the catalogue/reference
+  // data that everything else in the app (stock, reports, put-away) is built
+  // on top of, so grouping them together makes that relationship obvious and
+  // keeps the top-level menu shorter.
+  const masterDataItems = [
+    { id: 'items', label: 'Manage Items', icon: Boxes, show: userRole === 'admin' || userRole === 'inventory_manager' },
+    { id: 'brands', label: 'Brands', icon: Tag, show: true },
+    { id: 'locations', label: 'Location Master', icon: Warehouse, show: userRole === 'admin' || userRole === 'inventory_manager' },
+  ].filter((item) => item.show);
+
+  const isMasterDataActive = masterDataItems.some((item) => item.id === currentView);
+  const [masterDataOpen, setMasterDataOpen] = useState(isMasterDataActive);
+
+  // Auto-expand the group whenever navigation lands on one of its pages
+  // (e.g. a direct view-change from elsewhere in the app), without fighting
+  // a user who deliberately collapsed it while sitting on a different page.
+  useEffect(() => {
+    if (isMasterDataActive) setMasterDataOpen(true);
+  }, [isMasterDataActive]);
 
   return (
     <aside className="w-64 bg-gradient-to-b from-emerald-900 to-emerald-800 text-white shadow-lg h-screen flex flex-col">
@@ -51,7 +69,61 @@ export default function Navigation({ currentView, onViewChange, userRole, userNa
           <Smartphone size={20} />
           <span>Field Mode</span>
         </button>
-        {menuItems.map((item) => {
+        {menuItems.filter((item) => ['dashboard', 'overview', 'reorder'].includes(item.id)).map((item) => {
+          if (!item.show) return null;
+          const Icon = item.icon;
+          const isActive = currentView === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => onViewChange(item.id)}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition ${
+                isActive ? 'bg-emerald-600 text-white' : 'text-emerald-100 hover:bg-emerald-700'
+              }`}
+            >
+              <Icon size={20} />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+
+        {masterDataItems.length > 0 && (
+          <div>
+            <button
+              onClick={() => setMasterDataOpen((open) => !open)}
+              aria-expanded={masterDataOpen}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition ${
+                isMasterDataActive && !masterDataOpen ? 'bg-emerald-600 text-white' : 'text-emerald-100 hover:bg-emerald-700'
+              }`}
+            >
+              <Database size={20} />
+              <span className="flex-1 text-left">Master Data</span>
+              {masterDataOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            </button>
+            {masterDataOpen && (
+              <div className="mt-1 space-y-1 pl-4 border-l border-emerald-700 ml-5">
+                {masterDataItems.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = currentView === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => onViewChange(item.id)}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                        isActive ? 'bg-emerald-600 text-white' : 'text-emerald-100 hover:bg-emerald-700'
+                      }`}
+                    >
+                      <Icon size={16} />
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {menuItems.filter((item) => !['dashboard', 'overview', 'reorder'].includes(item.id)).map((item) => {
           if (!item.show) return null;
           const Icon = item.icon;
           const isActive = currentView === item.id;
