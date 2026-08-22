@@ -350,6 +350,21 @@ async function extractRowsFromFile(file) {
   throw new Error('Unsupported file type. Upload an Excel/CSV file, a photo (JPG/PNG), or a PDF.');
 }
 
+// Used when someone selects multiple files or an entire folder (folder
+// picking via the browser's directory input has no way to filter by type
+// up front, so a folder full of scanned invoices often also picks up
+// .DS_Store, Thumbs.db, or other junk). Silently drop anything that isn't a
+// spreadsheet/PDF/image rather than surfacing a scary error for every one.
+function isSupportedImportFile(file) {
+  return /\.(xlsx|xls|csv)$/i.test(file.name) || file.type === 'application/pdf' || file.type.startsWith('image/');
+}
+
+// Shared props spread onto every "select multiple files" input in this file
+// — lets a folder be dragged/selected as a whole via the OS folder picker on
+// top of the normal multi-file selection.
+const MULTI_FILE_PROPS = { multiple: true };
+const FOLDER_PICKER_PROPS = { webkitdirectory: 'true', directory: 'true', multiple: true };
+
 export default function ImportData({ userRole, userEmail }) {
   const [mode, setMode] = useState('newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'unmatched'
   const [existingItems, setExistingItems] = useState([]);
@@ -465,6 +480,7 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
   const [sourceLabel, setSourceLabel] = useState('');
   const [detectedMeta, setDetectedMeta] = useState(null);
   const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
 
   useEffect(() => {
     ensureSeedBrands(userEmail).then(() => fetchBrands().then(setBrands));
@@ -485,26 +501,48 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
   }, [rows]);
 
   const handleFile = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const allSelected = Array.from(e.target.files || []);
+    const files = allSelected.filter(isSupportedImportFile);
+    const skipped = allSelected.length - files.length;
+    if (!files.length) {
+      if (allSelected.length) setError('No Excel/CSV/photo/PDF files found in that selection.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
+      return;
+    }
     setError('');
     setSuccess('');
     setRows([]);
     setDetectedMeta(null);
-    setSourceLabel(file.name);
+    setSourceLabel(files.length === 1 ? files[0].name : `${files.length} files (${files.map((f) => f.name).join(', ')})`);
     setBusy(true);
+    const allRows = [];
+    let firstMeta = null;
+    const fileErrors = [];
     try {
-      const { rows: mapped, meta } = await extractRowsFromFile(file);
-      if (mapped.length === 0) {
-        setError('No recognizable item rows found in that file.');
+      for (const file of files) {
+        try {
+          const { rows: mapped, meta } = await extractRowsFromFile(file);
+          allRows.push(...mapped);
+          if (!firstMeta && meta) firstMeta = meta;
+        } catch (err) {
+          fileErrors.push(`${file.name}: ${err.message || 'failed to read'}`);
+        }
       }
-      setRows(mapped);
-      setDetectedMeta(meta);
-    } catch (err) {
-      setError(err.message || 'Failed to read that file.');
+      if (allRows.length === 0) {
+        setError(fileErrors.length ? fileErrors.join(' ') : 'No recognizable item rows found in that file.');
+      } else {
+        const notes = [];
+        if (fileErrors.length) notes.push(`${fileErrors.length} of ${files.length} file(s) could not be read: ${fileErrors.join(' ')}`);
+        if (skipped) notes.push(`${skipped} unsupported file(s) in that selection were skipped.`);
+        if (notes.length) setError(notes.join(' '));
+      }
+      setRows(allRows);
+      setDetectedMeta(firstMeta);
     } finally {
       setBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
     }
   };
 
@@ -737,7 +775,7 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
         <div className="flex flex-wrap items-center gap-4">
           <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer ${brand ? 'bg-emerald-700 hover:bg-emerald-800' : 'bg-gray-300 pointer-events-none'}`}>
             <UploadCloud size={18} />
-            Choose File
+            Choose File(s)
             <input
               ref={fileInputRef}
               type="file"
@@ -745,11 +783,24 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
               onChange={handleFile}
               className="hidden"
               disabled={!brand}
+              {...MULTI_FILE_PROPS}
+            />
+          </label>
+          <label className={`flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer border-2 ${brand ? 'border-emerald-700 text-emerald-700 hover:bg-emerald-50' : 'border-gray-300 text-gray-400 pointer-events-none'}`}>
+            <UploadCloud size={18} />
+            Choose Folder
+            <input
+              ref={folderInputRef}
+              type="file"
+              onChange={handleFile}
+              className="hidden"
+              disabled={!brand}
+              {...FOLDER_PICKER_PROPS}
             />
           </label>
           <span className="text-sm text-gray-500 flex items-center gap-2">
             <FileSpreadsheet size={16} /> Excel / CSV, or
-            <ScanLine size={16} /> photo / PDF (AI scan)
+            <ScanLine size={16} /> photo / PDF (AI scan) — select multiple, or a whole folder of scans
           </span>
           {busy && (
             <span className="text-sm text-emerald-700 flex items-center gap-2">
@@ -1235,6 +1286,7 @@ function MovementImport({ existingItems, userEmail }) {
   // posts, reports and audits against the date printed on it, not today.
   const [transactionDate, setTransactionDate] = useState(new Date().toISOString().slice(0, 10));
   const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
 
   // Duplicate-reference guard: if this reference/invoice number was already
   // used on a previous recorded movement, warn before letting it happen
@@ -1291,21 +1343,53 @@ function MovementImport({ existingItems, userEmail }) {
   );
 
   const handleFile = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const allSelected = Array.from(e.target.files || []);
+    const files = allSelected.filter(isSupportedImportFile);
+    const skipped = allSelected.length - files.length;
+    if (!files.length) {
+      if (allSelected.length) setError('No Excel/CSV/photo/PDF files found in that selection.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
+      return;
+    }
     setError('');
     setSuccess('');
     setRows([]);
     setDetectedMeta(null);
-    setSourceLabel(file.name);
-    setReason(file.name.replace(/\.[^/.]+$/, ''));
+    const label = files.length === 1 ? files[0].name : `${files.length} files (${files.map((f) => f.name).join(', ')})`;
+    setSourceLabel(label);
+    setReason(files.length === 1 ? files[0].name.replace(/\.[^/.]+$/, '') : label);
     setBusy(true);
+    // Multiple files are treated as pages of ONE document — rows from every
+    // file are combined into a single review table, but reference/party/date
+    // auto-fill below only comes from the FIRST file's detected metadata, so
+    // uploading several different invoices at once won't have a later one
+    // silently overwrite the reason/supplier/date already filled from an
+    // earlier one. This matches the common real case (a multi-page invoice
+    // photographed as separate JPGs) rather than "several unrelated docs".
+    const allMapped = [];
+    let firstMeta = null;
+    const fileErrors = [];
     try {
-      const { rows: mapped, meta } = await extractRowsFromFile(file);
-      if (mapped.length === 0) {
-        setError('No recognizable item rows found in that file.');
+      for (const file of files) {
+        try {
+          const { rows: mapped, meta } = await extractRowsFromFile(file);
+          allMapped.push(...mapped);
+          if (!firstMeta && meta) firstMeta = meta;
+        } catch (err) {
+          fileErrors.push(`${file.name}: ${err.message || 'failed to read'}`);
+        }
       }
-      const withMatches = mapped.map((r) => {
+      if (allMapped.length === 0) {
+        setError(fileErrors.length ? fileErrors.join(' ') : 'No recognizable item rows found in that file.');
+        return;
+      }
+      const notes = [];
+      if (fileErrors.length) notes.push(`${fileErrors.length} of ${files.length} file(s) could not be read: ${fileErrors.join(' ')}`);
+      if (skipped) notes.push(`${skipped} unsupported file(s) in that selection were skipped.`);
+      if (notes.length) setError(notes.join(' '));
+
+      const withMatches = allMapped.map((r) => {
         const match = findBestMatch(r.particulars, existingItems, r.partCode);
         return {
           particulars: r.particulars,
@@ -1318,7 +1402,8 @@ function MovementImport({ existingItems, userEmail }) {
       });
       setRows(withMatches);
       // Auto-pick the movement type and pre-fill reference/party from what
-      // was detected in the document — the person can still override both.
+      // was detected in the (first) document — the person can still override
+      // both.
       //
       // A document TYPE alone (e.g. "Delivery Challan") never actually says
       // which direction stock is moving — a supplier's own DC addressed to
@@ -1330,6 +1415,7 @@ function MovementImport({ existingItems, userEmail }) {
       // packing lists auto-set to "Delivery Challan / Sale (Out)") has
       // repeatedly caused wrong stock-outs, so don't rely on someone
       // catching the warning banner every single time.
+      const meta = firstMeta;
       let effectiveDocType = meta?.documentType || null;
       let autoCorrectedFrom = null;
       if (meta?.documentType && MOVEMENT_TYPES.some((m) => m.id === meta.documentType)) {
@@ -1367,6 +1453,7 @@ function MovementImport({ existingItems, userEmail }) {
     } finally {
       setBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
     }
   };
 
@@ -1548,18 +1635,30 @@ function MovementImport({ existingItems, userEmail }) {
         <div className="flex flex-wrap items-center gap-4">
           <label className="flex items-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white px-4 py-2 rounded-lg cursor-pointer">
             <UploadCloud size={18} />
-            Choose File
+            Choose File(s)
             <input
               ref={fileInputRef}
               type="file"
               accept=".xlsx,.xls,.csv,image/*,application/pdf"
               onChange={handleFile}
               className="hidden"
+              {...MULTI_FILE_PROPS}
+            />
+          </label>
+          <label className="flex items-center gap-2 border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50 px-4 py-2 rounded-lg cursor-pointer">
+            <UploadCloud size={18} />
+            Choose Folder
+            <input
+              ref={folderInputRef}
+              type="file"
+              onChange={handleFile}
+              className="hidden"
+              {...FOLDER_PICKER_PROPS}
             />
           </label>
           <span className="text-sm text-gray-500 flex items-center gap-2">
             <FileSpreadsheet size={16} /> Excel / CSV, or
-            <ScanLine size={16} /> photo / PDF (AI scan)
+            <ScanLine size={16} /> photo / PDF (AI scan) — select multiple pages of one document, or a whole folder
           </span>
           {busy && (
             <span className="text-sm text-emerald-700 flex items-center gap-2">
@@ -1870,78 +1969,110 @@ function parseBulkBrandFile(file) {
 
 function BulkBrandUpdate({ existingItems, userEmail }) {
   const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
 
   const handleFile = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const allSelected = Array.from(e.target.files || []);
+    const files = allSelected.filter((f) => /\.(xlsx|xls|csv)$/i.test(f.name));
+    const skipped = allSelected.length - files.length;
+    if (!files.length) {
+      if (allSelected.length) setError('No Excel/CSV files found in that selection.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
+      return;
+    }
     setError('');
     setResult(null);
     setBusy(true);
+
+    // A local, immutable-update copy of the S.No -> item lookup, kept in
+    // sync as each file is processed — so if the same S.No appears in two
+    // files in this batch (e.g. corrections split across two sheets), the
+    // second file's "already has that brand" check sees the FIRST file's
+    // change rather than stale data from before the batch started.
+    const bySno = new Map();
+    existingItems.forEach((it) => bySno.set(Number(it.sno), it));
+
+    let updated = 0;
+    let unchanged = 0;
+    let notFound = 0;
+    let leftUnassigned = 0;
+    let total = 0;
+    const fileErrors = [];
+
     try {
-      const rows = await parseBulkBrandFile(file);
-      if (rows.length === 0) {
+      for (const file of files) {
+        try {
+          const rows = await parseBulkBrandFile(file);
+          total += rows.length;
+          const toWrite = [];
+
+          // Plain for...of (not rows.forEach(...)) so this isn't a function
+          // declared inside the outer file loop closing over the running
+          // totals below — same result, but keeps ESLint's no-loop-func
+          // warning from firing on every file processed.
+          for (const r of rows) {
+            const sno = Number(r.sno);
+            const newBrand = String(r.brand || '').trim();
+            if (!newBrand || newBrand.toLowerCase() === 'unassigned') {
+              leftUnassigned += 1;
+              continue;
+            }
+            const item = bySno.get(sno);
+            if (!item) {
+              notFound += 1;
+              continue;
+            }
+            if ((item.brand || '') === newBrand) {
+              unchanged += 1;
+              continue;
+            }
+            toWrite.push({ id: item.id, brand: newBrand, sno });
+          }
+
+          const batchSize = 400;
+          for (let i = 0; i < toWrite.length; i += batchSize) {
+            const batch = writeBatch(db);
+            toWrite.slice(i, i + batchSize).forEach((w) => {
+              batch.update(doc(db, 'items', w.id), { brand: w.brand, updatedAt: serverTimestamp() });
+            });
+            await batch.commit();
+            updated += Math.min(batchSize, toWrite.length - i);
+          }
+          toWrite.forEach((w) => bySno.set(w.sno, { ...bySno.get(w.sno), brand: w.brand }));
+
+          await addDoc(collection(db, 'importHistory'), {
+            brand: 'ALL',
+            mode: 'bulkBrandUpdate',
+            fileName: file.name,
+            importedByEmail: userEmail || '',
+            importedAt: serverTimestamp(),
+            rowsAdded: 0,
+            rowsUpdated: toWrite.length,
+            rowsSkipped: rows.length - toWrite.length,
+          });
+        } catch (err) {
+          fileErrors.push(`${file.name}: ${err.message || 'failed to process'}`);
+        }
+      }
+
+      const notes = [];
+      if (fileErrors.length) notes.push(fileErrors.join(' '));
+      if (skipped) notes.push(`${skipped} unsupported file(s) in that selection were skipped.`);
+      if (notes.length) setError(notes.join(' '));
+
+      if (total > 0 || updated > 0) {
+        setResult({ updated, unchanged, notFound, leftUnassigned, total });
+      } else if (!fileErrors.length) {
         setError('No rows found under the S.No / Brand columns.');
-        return;
       }
-
-      const bySno = new Map();
-      existingItems.forEach((it) => bySno.set(Number(it.sno), it));
-
-      let updated = 0;
-      let unchanged = 0;
-      let notFound = 0;
-      let leftUnassigned = 0;
-      const toWrite = [];
-
-      rows.forEach((r) => {
-        const sno = Number(r.sno);
-        const newBrand = String(r.brand || '').trim();
-        if (!newBrand || newBrand.toLowerCase() === 'unassigned') {
-          leftUnassigned += 1;
-          return;
-        }
-        const item = bySno.get(sno);
-        if (!item) {
-          notFound += 1;
-          return;
-        }
-        if ((item.brand || '') === newBrand) {
-          unchanged += 1;
-          return;
-        }
-        toWrite.push({ id: item.id, brand: newBrand });
-      });
-
-      const batchSize = 400;
-      for (let i = 0; i < toWrite.length; i += batchSize) {
-        const batch = writeBatch(db);
-        toWrite.slice(i, i + batchSize).forEach((w) => {
-          batch.update(doc(db, 'items', w.id), { brand: w.brand, updatedAt: serverTimestamp() });
-        });
-        await batch.commit();
-        updated += Math.min(batchSize, toWrite.length - i);
-      }
-
-      await addDoc(collection(db, 'importHistory'), {
-        brand: 'ALL',
-        mode: 'bulkBrandUpdate',
-        fileName: file.name,
-        importedByEmail: userEmail || '',
-        importedAt: serverTimestamp(),
-        rowsAdded: 0,
-        rowsUpdated: updated,
-        rowsSkipped: unchanged + notFound + leftUnassigned,
-      });
-
-      setResult({ updated, unchanged, notFound, leftUnassigned, total: rows.length });
-    } catch (err) {
-      setError(err.message || 'Failed to process that file.');
     } finally {
       setBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
     }
   };
 
@@ -1967,11 +2098,18 @@ function BulkBrandUpdate({ existingItems, userEmail }) {
         </div>
       )}
 
-      <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer w-fit ${busy ? 'bg-gray-300 pointer-events-none' : 'bg-emerald-700 hover:bg-emerald-800'}`}>
-        {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
-        {busy ? 'Applying...' : 'Upload S.No + Brand File'}
-        <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy} />
-      </label>
+      <div className="flex flex-wrap items-center gap-3">
+        <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer w-fit ${busy ? 'bg-gray-300 pointer-events-none' : 'bg-emerald-700 hover:bg-emerald-800'}`}>
+          {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
+          {busy ? 'Applying...' : 'Upload S.No + Brand File(s)'}
+          <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy} {...MULTI_FILE_PROPS} />
+        </label>
+        <label className={`flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer w-fit border-2 ${busy ? 'border-gray-300 text-gray-400 pointer-events-none' : 'border-emerald-700 text-emerald-700 hover:bg-emerald-50'}`}>
+          <UploadCloud size={16} />
+          Choose Folder
+          <input ref={folderInputRef} type="file" onChange={handleFile} className="hidden" disabled={busy} {...FOLDER_PICKER_PROPS} />
+        </label>
+      </div>
     </div>
   );
 }
@@ -2046,6 +2184,7 @@ function parsePriceFile(file) {
 
 function BulkPriceUpdate({ existingItems, userEmail }) {
   const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
   const [brands, setBrands] = useState([]);
   const [brand, setBrand] = useState('');
   const [busy, setBusy] = useState(false);
@@ -2059,8 +2198,15 @@ function BulkPriceUpdate({ existingItems, userEmail }) {
   const brandItems = useMemo(() => existingItems.filter((it) => it.brand === brand), [existingItems, brand]);
 
   const handleFile = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const allSelected = Array.from(e.target.files || []);
+    const files = allSelected.filter((f) => /\.(xlsx|xls|csv)$/i.test(f.name));
+    const skipped = allSelected.length - files.length;
+    if (!files.length) {
+      if (allSelected.length) setError('No Excel/CSV files found in that selection.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
+      return;
+    }
     setError('');
     setResult(null);
     if (!brand) {
@@ -2068,94 +2214,125 @@ function BulkPriceUpdate({ existingItems, userEmail }) {
       return;
     }
     setBusy(true);
+
+    // Index every existing item in this brand by every part number it's
+    // known under (current + old), so a price row matches regardless of
+    // which number the item was originally entered with. Kept as a mutable
+    // local snapshot of avgCost/purchaseCost so if the same part number
+    // appears in two files in this batch, the second file's "unchanged"
+    // check compares against the price the FIRST file just set, not stale
+    // data from before the batch started.
+    const byPartNumber = new Map();
+    brandItems.forEach((it) => {
+      const keys = [...allPartNumbers(it), it.partCode]
+        .map((p) => String(p || '').trim().toLowerCase())
+        .filter(Boolean);
+      keys.forEach((k) => {
+        if (!byPartNumber.has(k)) byPartNumber.set(k, new Set());
+        byPartNumber.get(k).add(it.id);
+      });
+    });
+    const itemById = new Map(brandItems.map((it) => [it.id, { ...it }]));
+
+    let notFound = 0;
+    let skippedNoPrice = 0;
+    let unchanged = 0;
+    let updated = 0;
+    let total = 0;
+    const fileErrors = [];
+
     try {
-      const rows = await parsePriceFile(file);
-      if (rows.length === 0) {
-        setError('No rows found under the Part Number / Price columns.');
-        return;
-      }
+      for (const file of files) {
+        try {
+          const rows = await parsePriceFile(file);
+          total += rows.length;
+          const toWrite = new Map(); // item id -> price
 
-      // Index every existing item in this brand by every part number it's
-      // known under (current + old), so a price row matches regardless of
-      // which number the item was originally entered with.
-      const byPartNumber = new Map();
-      brandItems.forEach((it) => {
-        const keys = [...allPartNumbers(it), it.partCode]
-          .map((p) => String(p || '').trim().toLowerCase())
-          .filter(Boolean);
-        keys.forEach((k) => {
-          if (!byPartNumber.has(k)) byPartNumber.set(k, new Set());
-          byPartNumber.get(k).add(it.id);
-        });
-      });
-      const itemById = new Map(brandItems.map((it) => [it.id, it]));
+          // Plain for...of loops (not .forEach(...)) here too — see the
+          // comment in BulkBrandUpdate above for why: avoids declaring a
+          // function inside the outer per-file loop that closes over the
+          // running totals below.
+          for (const r of rows) {
+            if (r.price === null) {
+              skippedNoPrice += 1;
+              continue;
+            }
+            const keys = [r.partNumber, ...r.oldPartNumbers]
+              .map((p) => String(p || '').trim().toLowerCase())
+              .filter(Boolean);
+            const matchedIds = new Set();
+            for (const k of keys) {
+              const ids = byPartNumber.get(k);
+              if (ids) ids.forEach((id) => matchedIds.add(id));
+            }
+            if (matchedIds.size === 0) {
+              notFound += 1;
+              continue;
+            }
+            matchedIds.forEach((id) => toWrite.set(id, r.price));
+          }
 
-      let notFound = 0;
-      let skippedNoPrice = 0;
-      const toWrite = new Map(); // item id -> price
+          const finalWrites = [];
+          for (const [id, price] of toWrite) {
+            const item = itemById.get(id);
+            const currentCost = Number(item.avgCost || item.purchaseCost || 0);
+            if (currentCost === Number(price)) {
+              unchanged += 1;
+              continue;
+            }
+            finalWrites.push({ id, price });
+          }
 
-      rows.forEach((r) => {
-        if (r.price === null) {
-          skippedNoPrice += 1;
-          return;
-        }
-        const keys = [r.partNumber, ...r.oldPartNumbers]
-          .map((p) => String(p || '').trim().toLowerCase())
-          .filter(Boolean);
-        const matchedIds = new Set();
-        keys.forEach((k) => {
-          const ids = byPartNumber.get(k);
-          if (ids) ids.forEach((id) => matchedIds.add(id));
-        });
-        if (matchedIds.size === 0) {
-          notFound += 1;
-          return;
-        }
-        matchedIds.forEach((id) => toWrite.set(id, r.price));
-      });
-
-      let unchanged = 0;
-      const finalWrites = [];
-      toWrite.forEach((price, id) => {
-        const item = itemById.get(id);
-        const currentCost = Number(item.avgCost || item.purchaseCost || 0);
-        if (currentCost === Number(price)) {
-          unchanged += 1;
-          return;
-        }
-        finalWrites.push({ id, price });
-      });
-
-      const batchSize = 400;
-      for (let i = 0; i < finalWrites.length; i += batchSize) {
-        const batch = writeBatch(db);
-        finalWrites.slice(i, i + batchSize).forEach((w) => {
-          batch.update(doc(db, 'items', w.id), {
-            purchaseCost: Number(w.price),
-            avgCost: Number(w.price),
-            updatedAt: serverTimestamp(),
+          const batchSize = 400;
+          for (let i = 0; i < finalWrites.length; i += batchSize) {
+            const batch = writeBatch(db);
+            finalWrites.slice(i, i + batchSize).forEach((w) => {
+              batch.update(doc(db, 'items', w.id), {
+                purchaseCost: Number(w.price),
+                avgCost: Number(w.price),
+                updatedAt: serverTimestamp(),
+              });
+            });
+            await batch.commit();
+          }
+          finalWrites.forEach((w) => {
+            const item = itemById.get(w.id);
+            if (item) {
+              item.avgCost = Number(w.price);
+              item.purchaseCost = Number(w.price);
+            }
           });
-        });
-        await batch.commit();
+          updated += finalWrites.length;
+
+          await addDoc(collection(db, 'importHistory'), {
+            brand,
+            mode: 'bulkPriceUpdate',
+            fileName: file.name,
+            importedByEmail: userEmail || '',
+            importedAt: serverTimestamp(),
+            rowsAdded: 0,
+            rowsUpdated: finalWrites.length,
+            rowsSkipped: rows.length - finalWrites.length,
+          });
+        } catch (err) {
+          fileErrors.push(`${file.name}: ${err.message || 'failed to process'}`);
+        }
       }
 
-      await addDoc(collection(db, 'importHistory'), {
-        brand,
-        mode: 'bulkPriceUpdate',
-        fileName: file.name,
-        importedByEmail: userEmail || '',
-        importedAt: serverTimestamp(),
-        rowsAdded: 0,
-        rowsUpdated: finalWrites.length,
-        rowsSkipped: unchanged + notFound + skippedNoPrice,
-      });
+      const notes = [];
+      if (fileErrors.length) notes.push(fileErrors.join(' '));
+      if (skipped) notes.push(`${skipped} unsupported file(s) in that selection were skipped.`);
+      if (notes.length) setError(notes.join(' '));
 
-      setResult({ updated: finalWrites.length, unchanged, notFound, skippedNoPrice, total: rows.length });
-    } catch (err) {
-      setError(err.message || 'Failed to process that file.');
+      if (total > 0) {
+        setResult({ updated, unchanged, notFound, skippedNoPrice, total });
+      } else if (!fileErrors.length) {
+        setError('No rows found under the Part Number / Price columns.');
+      }
     } finally {
       setBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
     }
   };
 
@@ -2189,11 +2366,18 @@ function BulkPriceUpdate({ existingItems, userEmail }) {
         </div>
       )}
 
-      <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer w-fit ${busy || !brand ? 'bg-gray-300 pointer-events-none' : 'bg-emerald-700 hover:bg-emerald-800'}`}>
-        {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
-        {busy ? 'Applying...' : 'Upload Part Number + Price File'}
-        <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy || !brand} />
-      </label>
+      <div className="flex flex-wrap items-center gap-3">
+        <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer w-fit ${busy || !brand ? 'bg-gray-300 pointer-events-none' : 'bg-emerald-700 hover:bg-emerald-800'}`}>
+          {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
+          {busy ? 'Applying...' : 'Upload Part Number + Price File(s)'}
+          <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy || !brand} {...MULTI_FILE_PROPS} />
+        </label>
+        <label className={`flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer w-fit border-2 ${busy || !brand ? 'border-gray-300 text-gray-400 pointer-events-none' : 'border-emerald-700 text-emerald-700 hover:bg-emerald-50'}`}>
+          <UploadCloud size={16} />
+          Choose Folder
+          <input ref={folderInputRef} type="file" onChange={handleFile} className="hidden" disabled={busy || !brand} {...FOLDER_PICKER_PROPS} />
+        </label>
+      </div>
     </div>
   );
 }
