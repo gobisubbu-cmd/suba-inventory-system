@@ -53,6 +53,7 @@ const FIELD_ALIASES = {
   minStock: ['minimum stock', 'min stock'],
   maxStock: ['maximum stock', 'max stock'],
   category: ['category'],
+  brandOverride: ['brand', 'brand name', 'group'],
   machineModels: ['machine model(s)', 'machine model', 'model', 'models'],
   supplier: ['supplier'],
   notes: ['notes', 'remarks', 'notes / source'],
@@ -554,9 +555,9 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
     setRows((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  const logImportHistory = async (summary) => {
+  const logImportHistory = async (summary, brandOverride) => {
     await addDoc(collection(db, 'importHistory'), {
-      brand,
+      brand: brandOverride || brand,
       mode: importMode,
       fileName: sourceLabel,
       importedByEmail: userEmail || '',
@@ -580,6 +581,21 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
     if (clean.length === 0) {
       setError('Nothing to import.');
       return;
+    }
+
+    if (importMode === 'upsert') {
+      const knownBrands = new Set(brands.map((b) => b.name));
+      const unknownBrands = [...new Set(
+        clean
+          .map((r) => String(r.brandOverride || '').trim().toUpperCase())
+          .filter((b) => b && !knownBrands.has(b))
+      )];
+      if (unknownBrands.length) {
+        setError(
+          `File references brand(s) that don't exist yet: ${unknownBrands.join(', ')}. Create them on the Brands page first, then re-upload.`
+        );
+        return;
+      }
     }
 
     setBusy(true);
@@ -636,10 +652,19 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
         const matchedOps = []; // { ref, updates }
         const newItemOps = []; // { itemRef, itemData, txnRef|null, txnData|null, qty }
 
+        // A row may carry its own "Brand" column (e.g. a combined multi-brand
+        // catalogue file) — when present it wins over the brand selected in
+        // the dropdown above, so one upload can seed several brands at once.
+        // Rows without that column behave exactly as before.
+        const usedBrands = new Set();
         for (const r of clean) {
+          const rowBrand = String(r.brandOverride || '').trim().toUpperCase();
+          const effBrand = rowBrand || brand;
+          usedBrands.add(effBrand);
+          const candidates = rowBrand ? existingItems.filter((it) => it.brand === effBrand) : brandItems;
           const code = String(r.partCode || '').trim().toLowerCase();
           const oldCode = String(r.oldPartCode || '').trim().toLowerCase();
-          const match = brandItems.find((it) => {
+          const match = candidates.find((it) => {
             const itNew = String(it.partNumber || it.partCode || '').trim().toLowerCase();
             const itOld = (it.oldPartNumbers || []).map((o) => o.toLowerCase());
             if (code && (itNew === code || itOld.includes(code))) return true;
@@ -660,7 +685,7 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
           } else {
             const qty = Number(r.quantity) || 0;
             const itemRef = doc(collection(db, 'items'));
-            const itemData = buildItemDoc(r, brand, nextSno, qty);
+            const itemData = buildItemDoc(r, effBrand, nextSno, qty);
             nextSno += 1;
             let txnRef = null;
             let txnData = null;
@@ -669,7 +694,7 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
               txnData = {
                 itemId: itemRef.id,
                 itemName: r.particulars,
-                brand,
+                brand: effBrand,
                 type: 'opening',
                 direction: 'in',
                 quantity: qty,
@@ -712,8 +737,13 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
 
         const added = newItemOps.length;
         const updated = matchedOps.length;
-        await logImportHistory({ rowsAdded: added, rowsUpdated: updated, rowsSkipped: 0 });
-        setSuccess(`${brand}: added ${added} new part(s), updated ${updated} existing part(s).`);
+        const brandSummary = usedBrands.size > 1 ? `MULTIPLE (${[...usedBrands].sort().join(', ')})` : brand;
+        await logImportHistory({ rowsAdded: added, rowsUpdated: updated, rowsSkipped: 0 }, brandSummary);
+        setSuccess(
+          usedBrands.size > 1
+            ? `Imported across ${usedBrands.size} brands: added ${added} new part(s), updated ${updated} existing part(s).`
+            : `${brand}: added ${added} new part(s), updated ${updated} existing part(s).`
+        );
         setRows([]);
       }
     } catch (err) {
@@ -728,7 +758,9 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
       <p className="text-gray-500 text-sm max-w-2xl">
         Upload a brand's Excel/CSV master list (or a photo/PDF of a paper register / price list — an AI model will
         read it) to build the Master Spare Parts Catalogue. Every row must belong to the brand selected below; other
-        brands are never touched by this import.
+        brands are never touched by this import. Tip: if your file has its own "Brand" column, each row uses that
+        brand instead — handy for uploading one combined file across several brands at once (every brand named in
+        the file must already exist on the Brands page).
       </p>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">

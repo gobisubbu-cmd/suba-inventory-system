@@ -73,6 +73,14 @@ export function allPartNumbers(item) {
   return list;
 }
 
+// Strips spaces/hyphens so "SM401" can find "SM - 401" or "SM 401" — real
+// stock names are typed inconsistently (some with a hyphen before the model
+// number, some without, some with extra spacing), and a person searching
+// from a screenshot or supplier list won't know which style was used.
+function normalizeForLooseMatch(s) {
+  return String(s || '').toLowerCase().replace(/[\s-]+/g, '');
+}
+
 export function matchesSearch(item, term) {
   const t = String(term || '').trim().toLowerCase();
   if (!t) return true;
@@ -86,5 +94,11 @@ export function matchesSearch(item, term) {
     computeStockStatus(item),
     ...allPartNumbers(item),
   ];
-  return haystacks.some((h) => String(h || '').toLowerCase().includes(t));
+  // Precise pass first (keeps exact behavior for anyone relying on it).
+  if (haystacks.some((h) => String(h || '').toLowerCase().includes(t))) return true;
+  // Loose fallback: ignore spacing/hyphen differences, e.g. typing "SM401"
+  // (or even just "M40") should still find "SM - 401" / "SM 401".
+  const looseTerm = normalizeForLooseMatch(t);
+  if (!looseTerm) return false;
+  return haystacks.some((h) => normalizeForLooseMatch(h).includes(looseTerm));
 }
