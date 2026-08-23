@@ -77,7 +77,7 @@ export function allPartNumbers(item) {
 // stock names are typed inconsistently (some with a hyphen before the model
 // number, some without, some with extra spacing), and a person searching
 // from a screenshot or supplier list won't know which style was used.
-function normalizeForLooseMatch(s) {
+export function normalizeForLooseMatch(s) {
   return String(s || '').toLowerCase().replace(/[\s-]+/g, '');
 }
 

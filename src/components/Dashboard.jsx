@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query, addDoc, serverTimestamp } from 'firebase/firestore';
 import { Search, Package } from 'lucide-react';
-import { computeStockStatus, STOCK_STATUS_STYLES, allPartNumbers } from '../lib/brands';
+import { computeStockStatus, STOCK_STATUS_STYLES, allPartNumbers, normalizeForLooseMatch } from '../lib/brands';
 
 const PAGE_SIZE = 100;
 
@@ -50,12 +50,24 @@ export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
       const partNumberHit = [...allPartNumbers(it), it.partCode].some((p) =>
         String(p || '').toLowerCase().includes(s)
       );
-      return (
+      if (
         (it.particulars || '').toLowerCase().includes(s) ||
         partNumberHit ||
         (it.rackNo || '').toLowerCase().includes(s) ||
         (it.hsnCode || '').toLowerCase().includes(s) ||
         String(it.sno || '').includes(s)
+      ) {
+        return true;
+      }
+      // Loose fallback: real names are typed inconsistently ("SM - 401" vs
+      // "SM 401" vs "SM401") — ignore spacing/hyphen differences so typing
+      // any few letters/numbers still finds it regardless of which style
+      // was used when the item was entered.
+      const looseTerm = normalizeForLooseMatch(s);
+      if (!looseTerm) return false;
+      return (
+        normalizeForLooseMatch(it.particulars).includes(looseTerm) ||
+        [...allPartNumbers(it), it.partCode].some((p) => normalizeForLooseMatch(p).includes(looseTerm))
       );
     });
   }, [items, search, brandFilter]);
