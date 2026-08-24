@@ -221,7 +221,17 @@ export default function Reports({ userRole, userEmail }) {
         const it = itemsById.get(t.itemId);
         const partCode = (it && (it.partNumber || it.partCode)) || '';
         const qty = Number(t.quantity || 0);
-        const value = qty * Number(t.unitCost || 0);
+        // Purchases (and imports that had a cost column) record their own
+        // unitCost on the transaction. Stock Adjustments never ask for a
+        // cost at all (they're corrections, not trades), and some older
+        // Issue/DC rows never had one either — those used to show Value as
+        // a flat 0/blank even though the part clearly has a known cost.
+        // Fall back to the item's current Avg Cost so the report still
+        // shows a real, useful estimate instead of "no value".
+        const hasOwnCost = t.unitCost !== undefined && t.unitCost !== null && t.unitCost !== '';
+        const fallbackCost = it ? Number(it.avgCost || it.purchaseCost || 0) : 0;
+        const effectiveUnitCost = hasOwnCost ? Number(t.unitCost) : fallbackCost;
+        const value = qty * effectiveUnitCost;
         groupQty += qty;
         groupValue += value;
         out.push({
@@ -232,7 +242,12 @@ export default function Reports({ userRole, userEmail }) {
           Brand: t.brand || (it ? it.brand : '') || '',
           Quantity: qty,
           Unit: (it && it.unit) || '',
-          ...(canSeeValue ? { 'Unit Cost': t.unitCost || '', Value: Math.round(value * 100) / 100 } : {}),
+          ...(canSeeValue
+            ? {
+                'Unit Cost': effectiveUnitCost || '',
+                Value: Math.round(value * 100) / 100,
+              }
+            : {}),
           Type: t.type || '',
           'Supplier/Customer': t.supplier || t.customerName || '',
           'Reference / Doc No. (Packing List / Invoice / DC)': t.reason || '(No reference number)',
@@ -1259,7 +1274,9 @@ export default function Reports({ userRole, userEmail }) {
           Challans/Sales, and admin stock-adjustment decreases. Each export lists every part line — Part Code,
           Particulars, Quantity, and the Reference / Document Number (whatever was typed into "Reason / Reference"
           when it was recorded — the Packing List No, Invoice No, or DC No) — grouped under its Day/Month/Year/
-          Reference with a subtotal after each group and a grand total at the end. Leave dates blank to include
+          Reference with a subtotal after each group and a grand total at the end. Stock Adjustments (and any older
+          entry that never had a cost recorded on it) show the item's current Avg Cost as an estimated value instead
+          of a blank/zero — the actual invoice cost, when one exists, is always used first. Leave dates blank to include
           all history.
         </p>
         <div className="flex flex-wrap items-end gap-3">
