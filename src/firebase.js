@@ -25,6 +25,15 @@ export const auth = getAuth(app);
 // persistentMultipleTabManager lets several open tabs share one cache safely.
 export const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+  // Added 24 Aug 2026: Firestore's default streaming write channel was found
+  // hanging on this network (write POSTs to .../Write/channel never got a
+  // response, while reads and plain HTTPS worked fine) — so every write from
+  // ~Aug 20 sat "pending" forever: blank dates in Search/Activity logs, and
+  // items/transactions queued in the browser instead of reaching the server.
+  // Something between the browser and Google (proxy/antivirus/VPN-style
+  // software) breaks streamed uploads. Forcing long-polling makes Firestore
+  // use ordinary request/response HTTPS, which that middleware can't break.
+  experimentalForceLongPolling: true,
 });
 
 export default app;
