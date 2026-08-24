@@ -31,6 +31,7 @@ import {
   Tags,
   Coins,
   PackageSearch,
+  Layers,
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
@@ -372,7 +373,7 @@ export default function ImportData({ userRole, userEmail }) {
   // (inward/outward) mode — the master-catalogue and bulk-update modes can
   // rewrite the whole item database, so those stay admin/inventory-manager.
   const staffOnly = userRole === 'staff';
-  const [mode, setMode] = useState(staffOnly ? 'movement' : 'newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'unmatched'
+  const [mode, setMode] = useState(staffOnly ? 'movement' : 'newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'bulkCategory' | 'unmatched'
   const [existingItems, setExistingItems] = useState([]);
   const [pendingUnmatchedCount, setPendingUnmatchedCount] = useState(0);
 
@@ -443,6 +444,14 @@ export default function ImportData({ userRole, userEmail }) {
           <Coins size={16} /> Bulk Update Price
         </button>
         <button
+          onClick={() => setMode('bulkCategory')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+            mode === 'bulkCategory' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Layers size={16} /> Bulk Update Category
+        </button>
+        <button
           onClick={() => setMode('unmatched')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
             mode === 'unmatched' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
@@ -469,6 +478,9 @@ export default function ImportData({ userRole, userEmail }) {
       )}
       {mode === 'bulkPrice' && !staffOnly && (
         <BulkPriceUpdate existingItems={existingItems} userEmail={userEmail} />
+      )}
+      {mode === 'bulkCategory' && !staffOnly && (
+        <BulkCategoryUpdate existingItems={existingItems} userEmail={userEmail} />
       )}
       {mode === 'unmatched' && !staffOnly && (
         <UnmatchedImportsPanel existingItems={existingItems} userEmail={userEmail} />
@@ -2456,6 +2468,220 @@ function BulkPriceUpdate({ existingItems, userEmail }) {
           <UploadCloud size={16} />
           Choose Folder
           <input ref={folderInputRef} type="file" onChange={handleFile} className="hidden" disabled={busy || !brand} {...FOLDER_PICKER_PROPS} />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+// Bulk Update Category — splits a brand's stock into sections like
+// "Equipment" vs "Spares" (or any other label) by matching an uploaded
+// invoice/PO/packing-list against existing items and stamping every matched
+// item with one chosen category. Reuses extractRowsFromFile (so it accepts
+// the same Excel/CSV/photo/PDF a real invoice comes in as, with AI scanning
+// for photos/PDFs) and findBestMatch (matches by part number first, then
+// fuzzy name) — the same matching engine "Record Purchase/Issue/DC" uses,
+// just applied to the Category field instead of stock quantity.
+const CATEGORY_PRESETS = ['Equipment', 'Spares'];
+
+function BulkCategoryUpdate({ existingItems, userEmail }) {
+  const [brands, setBrands] = useState([]);
+  const [brand, setBrand] = useState('');
+  const [category, setCategory] = useState('');
+  const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    fetchBrands().then(setBrands);
+  }, []);
+
+  const brandItems = useMemo(() => existingItems.filter((it) => it.brand === brand), [existingItems, brand]);
+
+  const handleFile = async (e) => {
+    const allSelected = Array.from(e.target.files || []);
+    const files = allSelected.filter(isSupportedImportFile);
+    const skipped = allSelected.length - files.length;
+    if (!files.length) {
+      if (allSelected.length) setError('No Excel/CSV/photo/PDF files found in that selection.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
+      return;
+    }
+    setError('');
+    setResult(null);
+    if (!brand) {
+      setError('Select a brand first.');
+      return;
+    }
+    if (!category.trim()) {
+      setError('Enter (or pick) a category to apply — e.g. "Equipment" or "Spares".');
+      return;
+    }
+    setBusy(true);
+    const catValue = category.trim();
+    let matched = 0;
+    let alreadySet = 0;
+    let notMatched = 0;
+    let total = 0;
+    const notMatchedNames = [];
+    const fileErrors = [];
+
+    try {
+      for (const file of files) {
+        try {
+          const { rows } = await extractRowsFromFile(file);
+          total += rows.length;
+          const toWrite = [];
+          for (const r of rows) {
+            const match = findBestMatch(r.particulars, brandItems, r.partCode);
+            if (!match) {
+              notMatched += 1;
+              if (notMatchedNames.length < 20) notMatchedNames.push(r.particulars || r.partCode || '(blank)');
+              continue;
+            }
+            if ((match.category || '') === catValue) {
+              alreadySet += 1;
+              continue;
+            }
+            toWrite.push(match.id);
+          }
+          const uniqueIds = [...new Set(toWrite)];
+          const batchSize = 400;
+          for (let i = 0; i < uniqueIds.length; i += batchSize) {
+            const batch = writeBatch(db);
+            uniqueIds.slice(i, i + batchSize).forEach((id) => {
+              batch.update(doc(db, 'items', id), { category: catValue, updatedAt: serverTimestamp() });
+            });
+            await batch.commit();
+          }
+          matched += uniqueIds.length;
+
+          await addDoc(collection(db, 'importHistory'), {
+            brand,
+            mode: 'bulkCategoryUpdate',
+            fileName: `${file.name} → "${catValue}"`,
+            importedByEmail: userEmail || '',
+            importedAt: serverTimestamp(),
+            rowsAdded: 0,
+            rowsUpdated: uniqueIds.length,
+            rowsSkipped: rows.length - uniqueIds.length,
+          });
+        } catch (err) {
+          fileErrors.push(`${file.name}: ${err.message || 'failed to process'}`);
+        }
+      }
+
+      const notes = [];
+      if (fileErrors.length) notes.push(fileErrors.join(' '));
+      if (skipped) notes.push(`${skipped} unsupported file(s) in that selection were skipped.`);
+      if (notes.length) setError(notes.join(' '));
+
+      if (total > 0) {
+        setResult({ matched, alreadySet, notMatched, notMatchedNames, total, category: catValue, brand });
+        logActivity(userEmail, 'Bulk category update', `${brand}: ${matched} item(s) set to "${catValue}"${notMatched ? `, ${notMatched} not matched` : ''}`);
+      } else if (!fileErrors.length) {
+        setError('No recognizable item rows found in that file.');
+      }
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 space-y-4">
+      <p className="text-sm text-gray-600 max-w-2xl">
+        Splits a brand's stock into sections — e.g. <strong>Equipment</strong> vs <strong>Spares</strong> for RATIONAL.
+        Upload the invoice/PO/packing-list (Excel/CSV, or a photo/PDF — it's AI-scanned the same way as "Record
+        Purchase/Issue/DC") that lists the items belonging to one category. Every matched item gets its{' '}
+        <strong>Category</strong> field set to whatever you type below — nothing else about the item (stock, cost,
+        location) is touched. Once tagged, use the Category dropdown on the Dashboard to view just that section.
+      </p>
+
+      <div className="grid sm:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Brand *</label>
+          <select value={brand} onChange={(e) => setBrand(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
+            <option value="">Select brand...</option>
+            {brands.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Category to apply *</label>
+          <input
+            type="text"
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            placeholder="e.g. Equipment"
+            list="category-presets"
+            className="w-full px-3 py-2 border rounded-lg"
+          />
+          <datalist id="category-presets">
+            {CATEGORY_PRESETS.map((c) => <option key={c} value={c} />)}
+          </datalist>
+          <div className="flex gap-2 mt-1.5">
+            {CATEGORY_PRESETS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setCategory(c)}
+                className={`text-xs px-2 py-1 rounded border ${category === c ? 'bg-emerald-100 border-emerald-400 text-emerald-800 font-semibold' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
+
+      {result && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded text-sm space-y-1">
+          <p className="font-semibold">
+            Done — {result.matched} item(s) in {result.brand} set to "{result.category}".
+          </p>
+          <p>
+            {result.alreadySet} already had that category
+            {result.notMatched > 0 && <> &middot; {result.notMatched} row(s) had no matching item in {result.brand}</>}
+          </p>
+          {result.notMatchedNames.length > 0 && (
+            <p className="text-xs text-emerald-700">
+              Not matched: {result.notMatchedNames.join(', ')}{result.notMatched > result.notMatchedNames.length ? ', ...' : ''}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3">
+        <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer w-fit ${busy || !brand || !category.trim() ? 'bg-gray-300 pointer-events-none' : 'bg-emerald-700 hover:bg-emerald-800'}`}>
+          {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
+          {busy ? 'Applying...' : 'Upload File(s) to Match & Tag'}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv,image/*,application/pdf"
+            onChange={handleFile}
+            className="hidden"
+            disabled={busy || !brand || !category.trim()}
+            {...MULTI_FILE_PROPS}
+          />
+        </label>
+        <label className={`flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer w-fit border-2 ${busy || !brand || !category.trim() ? 'border-gray-300 text-gray-400 pointer-events-none' : 'border-emerald-700 text-emerald-700 hover:bg-emerald-50'}`}>
+          <UploadCloud size={16} />
+          Choose Folder
+          <input
+            ref={folderInputRef}
+            type="file"
+            onChange={handleFile}
+            className="hidden"
+            disabled={busy || !brand || !category.trim()}
+            {...FOLDER_PICKER_PROPS}
+          />
         </label>
       </div>
     </div>

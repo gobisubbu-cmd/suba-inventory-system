@@ -14,6 +14,13 @@ export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
   const [items, setItems] = useState([]);
   const [search, setSearch] = useState('');
   const [brandFilter, setBrandFilter] = useState('All');
+  // Category (e.g. Equipment vs Spares within a brand like RATIONAL) is a
+  // plain text field already on every item — this filter just reads it, it
+  // doesn't require any schema change. Resets to "All" whenever the brand
+  // changes so a category picked for one brand doesn't silently hide
+  // everything after switching to a brand that uses different category
+  // names.
+  const [categoryFilter, setCategoryFilter] = useState('All');
   const [page, setPage] = useState(0);
   const canSeeValue = userRole === 'admin' || userRole === 'inventory_manager';
 
@@ -39,10 +46,23 @@ export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
     return ['All', ...[...set].sort()];
   }, [items]);
 
+  // Only offer categories that actually exist within the currently selected
+  // brand, so the dropdown doesn't list "Equipment"/"Spares" for a brand
+  // that's never been split that way. Empty/uncategorized items show up as
+  // "Uncategorized" rather than disappearing from every category filter.
+  const categoryOptions = useMemo(() => {
+    const scoped = brandFilter === 'All' ? items : items.filter((it) => (it.brand || 'Unassigned') === brandFilter);
+    const set = new Set(scoped.map((it) => (it.category || '').trim() || 'Uncategorized'));
+    return ['All', ...[...set].sort()];
+  }, [items, brandFilter]);
+
+  useEffect(() => setCategoryFilter('All'), [brandFilter]);
+
   const filtered = useMemo(() => {
     const s = search.trim().toLowerCase();
     return items.filter((it) => {
       if (brandFilter !== 'All' && (it.brand || 'Unassigned') !== brandFilter) return false;
+      if (categoryFilter !== 'All' && ((it.category || '').trim() || 'Uncategorized') !== categoryFilter) return false;
       if (!s) return true;
       // Matches on current part number, any superseded/old part number, or
       // legacy partCode field — same logic as Spare Search, so a query like
@@ -70,9 +90,9 @@ export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
         [...allPartNumbers(it), it.partCode].some((p) => normalizeForLooseMatch(p).includes(looseTerm))
       );
     });
-  }, [items, search, brandFilter]);
+  }, [items, search, brandFilter, categoryFilter]);
 
-  useEffect(() => setPage(0), [search, brandFilter]);
+  useEffect(() => setPage(0), [search, brandFilter, categoryFilter]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const pageItems = filtered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
 
@@ -113,6 +133,11 @@ export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
         <select value={brandFilter} onChange={(e) => setBrandFilter(e.target.value)} className="px-3 py-2 border rounded-lg">
           {brandOptions.map((b) => <option key={b} value={b}>{b}</option>)}
         </select>
+        {categoryOptions.length > 2 && (
+          <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="px-3 py-2 border rounded-lg">
+            {categoryOptions.map((c) => <option key={c} value={c}>{c === 'All' ? 'All Categories' : c}</option>)}
+          </select>
+        )}
         <span className="text-sm text-gray-500 pb-2">{filtered.length} of {items.length} items</span>
       </div>
 
@@ -122,6 +147,9 @@ export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
             <tr>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">S.No</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Brand</th>
+              {categoryOptions.length > 2 && (
+                <th className="text-left px-4 py-3 font-semibold text-gray-600">Category</th>
+              )}
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Part Number</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Particulars</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Unit</th>
@@ -137,7 +165,7 @@ export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
           <tbody>
             {pageItems.length === 0 && (
               <tr>
-                <td colSpan={canSeeValue ? 10 : 9} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={(canSeeValue ? 10 : 9) + (categoryOptions.length > 2 ? 1 : 0)} className="px-4 py-8 text-center text-gray-400">
                   {search.trim() ? 'No items found.' : 'Start typing to search the catalogue.'}
                 </td>
               </tr>
@@ -151,6 +179,9 @@ export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
                   <td className="px-4 py-3">
                     <span className="inline-block bg-emerald-50 text-emerald-800 text-xs font-semibold px-2 py-1 rounded">{it.brand || 'Unassigned'}</span>
                   </td>
+                  {categoryOptions.length > 2 && (
+                    <td className="px-4 py-3 text-gray-600">{it.category || <span className="text-gray-300 italic">Uncategorized</span>}</td>
+                  )}
                   <td className="px-4 py-3 font-semibold text-emerald-700">{it.partNumber || it.partCode || '-'}</td>
                   <td className="px-4 py-3 font-medium text-gray-800">{it.particulars}</td>
                   <td className="px-4 py-3">{it.unit}</td>
