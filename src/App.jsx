@@ -30,7 +30,15 @@ import MobileQuickScan from './components/MobileQuickScan';
 import MobileEngineerIssue from './components/MobileEngineerIssue';
 import ActivityLog from './components/ActivityLog';
 import StockExport from './components/StockExport';
-import { runDailyBackupIfNeeded } from './backup';
+// Daily in-Firestore backup DISABLED 24 Aug 2026: at 7,700+ items across 18
+// collections it began timing out ("write stream exhausted" / 45s commit
+// timeouts) and, worse, its huge queued writes silently blocked ALL other
+// writes from the same browser — search logs and activity logs sat pending
+// forever with blank dates and never reached the server. Backups are now
+// handled outside the app (weekly dated Excel exports of the full catalogue,
+// current stock and all transactions to the owner's computer), so this
+// in-app copy is no longer worth the daily cost and breakage it causes.
+// import { runDailyBackupIfNeeded } from './backup';
 import './index.css';
 
 export default function App() {
@@ -96,9 +104,8 @@ export default function App() {
   // in the browser console — it should progress through
   // fetching-<collection>/writing-<collection>-... and land on 'success'.
   useEffect(() => {
-    if (user) {
-      runDailyBackupIfNeeded();
-    }
+    // Intentionally empty — daily backup disabled (see note on the import
+    // above). Kept so the effect's history is easy to find in git blame.
   }, [user]);
 
   if (loading) {
