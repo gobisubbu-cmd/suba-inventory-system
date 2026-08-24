@@ -12,6 +12,7 @@ import {
 } from 'firebase/firestore';
 import { HardHat, Plus, Trash2, PackageMinus, PackagePlus, Wrench, ClipboardList } from 'lucide-react';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
+import { logActivity } from '../lib/activityLog';
 
 const CONDITIONS = ['New', 'Used', 'Damaged'];
 const WARRANTY_OPTIONS = ['Warranty', 'Chargeable'];
@@ -207,6 +208,7 @@ function IssueForm({ items, userEmail, disabled }) {
         createdAt: serverTimestamp(),
       });
       setSuccess(`Issued ${valid.length} part(s) to ${engineerName} for job ${serviceJobNo}.`);
+      logActivity(userEmail, 'Engineer issue (outward)', `${valid.length} part(s) to ${engineerName} · job ${serviceJobNo}`);
       setServiceJobNo('');
       setEngineerName('');
       setCustomerName('');
@@ -317,6 +319,7 @@ function ReturnForm({ items, issues, userEmail, disabled }) {
         createdAt: serverTimestamp(),
       });
       setSuccess(`Recorded return of ${valid.length} part(s) from ${engineerName} for job ${serviceJobNo}.`);
+      logActivity(userEmail, 'Engineer return (inward)', `${valid.length} part(s) from ${engineerName} · job ${serviceJobNo}`);
       setServiceJobNo('');
       setEngineerName('');
       setLines([{ ...blankLine(), condition: 'New' }]);
@@ -437,6 +440,7 @@ function UsedForm({ items, userEmail, disabled }) {
         createdAt: serverTimestamp(),
       });
       setSuccess(`Recorded ${valid.length} part(s) used for job ${serviceJobNo}.`);
+      logActivity(userEmail, 'Parts used on job', `${valid.length} part(s) · job ${serviceJobNo}`);
       setServiceJobNo('');
       setCustomerName('');
       setMachineModel('');

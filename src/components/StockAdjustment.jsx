@@ -3,6 +3,7 @@ import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query, doc, runTransaction, serverTimestamp } from 'firebase/firestore';
 import { SlidersHorizontal, ShieldAlert } from 'lucide-react';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
+import { logActivity } from '../lib/activityLog';
 
 export default function StockAdjustment({ userRole, userEmail }) {
   const [items, setItems] = useState([]);
@@ -80,6 +81,7 @@ export default function StockAdjustment({ userRole, userEmail }) {
       });
       await checkAndSendLowStockAlert(itemId);
       setSuccess('Stock adjustment recorded.');
+      logActivity(userEmail, 'Stock adjustment', `${direction} ${quantity} · ${items.find((it) => it.id === itemId)?.particulars || itemId}${reason ? ` · ${reason}` : ''}`);
       setQuantity('');
       setReason('');
       setTransactionDate(new Date().toISOString().slice(0, 10));

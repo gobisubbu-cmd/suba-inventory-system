@@ -36,6 +36,7 @@ import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
 import { createPutawayLine, getExistingLocationsForItem } from '../putaway';
 import { fetchBrands, ensureSeedBrands, allPartNumbers } from '../lib/brands';
+import { logActivity } from '../lib/activityLog';
 
 const FIELD_ALIASES = {
   particulars: ['particulars', 'particular', 'item', 'item name', 'name', 'part name', 'material', 'description'],
@@ -367,7 +368,11 @@ const MULTI_FILE_PROPS = { multiple: true };
 const FOLDER_PICKER_PROPS = { webkitdirectory: 'true', directory: 'true', multiple: true };
 
 export default function ImportData({ userRole, userEmail }) {
-  const [mode, setMode] = useState('newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'unmatched'
+  // Staff are allowed in, but ONLY for the "Record Purchase / Issue / DC"
+  // (inward/outward) mode — the master-catalogue and bulk-update modes can
+  // rewrite the whole item database, so those stay admin/inventory-manager.
+  const staffOnly = userRole === 'staff';
+  const [mode, setMode] = useState(staffOnly ? 'movement' : 'newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'unmatched'
   const [existingItems, setExistingItems] = useState([]);
   const [pendingUnmatchedCount, setPendingUnmatchedCount] = useState(0);
 
@@ -385,11 +390,11 @@ export default function ImportData({ userRole, userEmail }) {
     return unsub;
   }, []);
 
-  if (userRole !== 'admin' && userRole !== 'inventory_manager') {
+  if (userRole !== 'admin' && userRole !== 'inventory_manager' && userRole !== 'staff') {
     return (
       <div className="max-w-md mx-auto mt-20 text-center text-gray-500">
         <ShieldAlert className="mx-auto mb-3 text-gray-400" size={40} />
-        <p>Import Data is restricted to Admin and Inventory Manager users.</p>
+        <p>Import Data is restricted to signed-in users.</p>
       </div>
     );
   }
@@ -402,6 +407,7 @@ export default function ImportData({ userRole, userEmail }) {
       </div>
 
       <div className="flex gap-2 bg-gray-100 rounded-lg p-1 w-fit">
+        {!staffOnly && (
         <button
           onClick={() => setMode('newItems')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
@@ -410,6 +416,7 @@ export default function ImportData({ userRole, userEmail }) {
         >
           <PackagePlus size={16} /> Brand Catalogue / Stock Import
         </button>
+        )}
         <button
           onClick={() => setMode('movement')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
@@ -418,6 +425,7 @@ export default function ImportData({ userRole, userEmail }) {
         >
           <ArrowLeftRight size={16} /> Record Purchase / Issue / DC
         </button>
+        {!staffOnly && (<>
         <button
           onClick={() => setMode('bulkBrand')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
@@ -447,21 +455,22 @@ export default function ImportData({ userRole, userEmail }) {
             </span>
           )}
         </button>
+        </>)}
       </div>
 
-      {mode === 'newItems' && (
+      {mode === 'newItems' && !staffOnly && (
         <NewItemsImport existingItems={existingItems} userEmail={userEmail} onSuggestMovement={() => setMode('movement')} />
       )}
       {mode === 'movement' && (
         <MovementImport existingItems={existingItems} userEmail={userEmail} />
       )}
-      {mode === 'bulkBrand' && (
+      {mode === 'bulkBrand' && !staffOnly && (
         <BulkBrandUpdate existingItems={existingItems} userEmail={userEmail} />
       )}
-      {mode === 'bulkPrice' && (
+      {mode === 'bulkPrice' && !staffOnly && (
         <BulkPriceUpdate existingItems={existingItems} userEmail={userEmail} />
       )}
-      {mode === 'unmatched' && (
+      {mode === 'unmatched' && !staffOnly && (
         <UnmatchedImportsPanel existingItems={existingItems} userEmail={userEmail} />
       )}
     </div>
@@ -632,6 +641,7 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
           rowsSkipped: 0,
           deletedExisting: docsToDelete.length,
         });
+        logActivity(userEmail, 'Catalogue import (replace)', `${brand}: removed ${docsToDelete.length}, added ${clean.length} items`);
         setSuccess(
           `Replaced ${brand} inventory: removed ${docsToDelete.length} old record(s), added ${clean.length} verified record(s).`
         );
@@ -739,6 +749,7 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
         const updated = matchedOps.length;
         const brandSummary = usedBrands.size > 1 ? `MULTIPLE (${[...usedBrands].sort().join(', ')})` : brand;
         await logImportHistory({ rowsAdded: added, rowsUpdated: updated, rowsSkipped: 0 }, brandSummary);
+        logActivity(userEmail, 'Catalogue import', `${brandSummary}: added ${added}, updated ${updated}`);
         setSuccess(
           usedBrands.size > 1
             ? `Imported across ${usedBrands.size} brands: added ${added} new part(s), updated ${updated} existing part(s).`
@@ -1615,6 +1626,11 @@ function MovementImport({ existingItems, userEmail }) {
         message += ` ${failed.length} failed: ${failed.join(' ')}`;
       }
       setSuccess(message);
+      logActivity(
+        userEmail,
+        `Stock ${movement.direction === 'in' ? 'inward' : 'outward'} (${movement.label || movement.id})`,
+        `Recorded ${recorded} movement(s)${reason.trim() ? ` · ${reason.trim()}` : ''}${supplier.trim() ? ` · ${supplier.trim()}` : ''}${unmatched.length ? ` · ${unmatched.length} unmatched` : ''}`
+      );
       setRows((prev) => prev.filter((r) => !matched.includes(r) || failed.some((f) => f.includes(r.particulars))));
     } catch (err) {
       setError(err.message);

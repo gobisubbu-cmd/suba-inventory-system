@@ -19,13 +19,20 @@ import {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
 } from 'firebase/auth';
-import { Users, ShieldAlert, UserPlus, Mail } from 'lucide-react';
+import { Users, ShieldAlert, UserPlus, Mail, Lock } from 'lucide-react';
+import { auth } from '../firebase';
+import { logActivity } from '../lib/activityLog';
 
 const ROLES = [
   { id: 'staff', label: 'Staff' },
   { id: 'inventory_manager', label: 'Inventory Manager' },
   { id: 'admin', label: 'Admin' },
 ];
+
+// The primary admin account can never have its role changed — not even by
+// another admin, and especially not by an accidental dropdown click. This
+// guarantees there is always at least one Admin who can reach Manage Users.
+const PRIMARY_ADMIN_EMAIL = 'gobisubbu@gmail.com';
 
 export default function ManageUsers({ userRole }) {
   const [users, setUsers] = useState([]);
@@ -75,6 +82,7 @@ export default function ManageUsers({ userRole }) {
         createdAt: new Date(),
       });
       await secondaryAuth.signOut();
+      logActivity(auth.currentUser?.email, 'Created user', `${email.trim()} as ${role}`);
       setSuccess(`User ${email.trim()} created with role ${role}.`);
       setEmail('');
       setPassword('');
@@ -88,8 +96,15 @@ export default function ManageUsers({ userRole }) {
   };
 
   const handleRoleChange = async (u, newRole) => {
+    // Hard guard (belt-and-braces on top of the disabled dropdown below):
+    // the primary admin's role is locked permanently.
+    if ((u.email || '').toLowerCase() === PRIMARY_ADMIN_EMAIL) {
+      setError('The primary admin account is locked and its role cannot be changed.');
+      return;
+    }
     try {
       await updateDoc(doc(db, 'users', u.id), { role: newRole });
+      logActivity(auth.currentUser?.email, 'Changed user role', `${u.email} → ${newRole}`);
     } catch (err) {
       setError(err.message);
     }
@@ -183,15 +198,21 @@ export default function ManageUsers({ userRole }) {
               <tr key={u.id} className="border-b last:border-0 hover:bg-gray-50">
                 <td className="px-4 py-3">{u.email}</td>
                 <td className="px-4 py-3">
-                  <select
-                    value={u.role}
-                    onChange={(e) => handleRoleChange(u, e.target.value)}
-                    className="px-2 py-1 border rounded-lg text-sm"
-                  >
-                    {ROLES.map((r) => (
-                      <option key={r.id} value={r.id}>{r.label}</option>
-                    ))}
-                  </select>
+                  {(u.email || '').toLowerCase() === PRIMARY_ADMIN_EMAIL ? (
+                    <span className="inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 text-sm font-semibold px-3 py-1 rounded-lg border border-emerald-300">
+                      <Lock size={13} /> Admin (Primary — locked)
+                    </span>
+                  ) : (
+                    <select
+                      value={u.role}
+                      onChange={(e) => handleRoleChange(u, e.target.value)}
+                      className="px-2 py-1 border rounded-lg text-sm"
+                    >
+                      {ROLES.map((r) => (
+                        <option key={r.id} value={r.id}>{r.label}</option>
+                      ))}
+                    </select>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   <button

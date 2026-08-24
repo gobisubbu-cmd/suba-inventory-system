@@ -28,6 +28,7 @@ import EngineerIssueReturn from './components/EngineerIssueReturn';
 import FieldMode from './components/FieldMode';
 import MobileQuickScan from './components/MobileQuickScan';
 import MobileEngineerIssue from './components/MobileEngineerIssue';
+import ActivityLog from './components/ActivityLog';
 import { runDailyBackupIfNeeded } from './backup';
 import './index.css';
 
@@ -194,6 +195,8 @@ export default function App() {
         return <ManageUsers userRole={userRole} />;
       case 'searchlogs':
         return <SearchLogs userRole={userRole} />;
+      case 'activity':
+        return <ActivityLog userRole={userRole} userEmail={user.email} />;
       case 'settings':
         return <Settings userRole={userRole} />;
       case 'warehouse':

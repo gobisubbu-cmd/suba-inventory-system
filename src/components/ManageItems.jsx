@@ -15,6 +15,7 @@ import { Boxes, Plus, Pencil, Copy, ArrowLeftRight, X, Search } from 'lucide-rea
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
 import { createPutawayLine } from '../putaway';
 import { fetchBrands, ensureSeedBrands, computeStockStatus, STOCK_STATUS_STYLES, matchesSearch } from '../lib/brands';
+import { logActivity } from '../lib/activityLog';
 
 const MOVEMENT_TYPES = [
   { id: 'purchase', label: 'Purchase (In)', direction: 'in' },
@@ -216,6 +217,7 @@ export default function ManageItems({ userRole }) {
           remarks: form.remarks.trim(),
           updatedAt: serverTimestamp(),
         });
+        logActivity(auth.currentUser?.email, 'Edited item', `${brand} · ${name}`);
       } else {
         const nextSno = items.length ? Math.max(...items.map((it) => Number(it.sno) || 0)) + 1 : 1;
         const opening = form.masterOnly ? 0 : Number(form.openingStock) || 0;
@@ -259,6 +261,7 @@ export default function ManageItems({ userRole }) {
           });
         }
         if (!form.masterOnly) checkAndSendLowStockAlert(newItemRef.id);
+        logActivity(auth.currentUser?.email, 'Added item', `${brand} · ${name}${opening > 0 ? ` · opening stock ${opening}` : ''}`);
       }
       setShowForm(false);
       resetForm();

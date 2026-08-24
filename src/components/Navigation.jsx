@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { signOut } from 'firebase/auth';
 import { auth } from '../firebase';
-import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat, Smartphone, Database, ChevronDown, ChevronRight } from 'lucide-react';
+import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat, Smartphone, Database, ChevronDown, ChevronRight, History } from 'lucide-react';
 
 const ROLE_LABELS = {
   staff: 'STAFF',
@@ -18,7 +18,10 @@ export default function Navigation({ currentView, onViewChange, userRole, userNa
     { id: 'dashboard', label: 'Dashboard', icon: Home, show: true },
     { id: 'overview', label: 'Overview', icon: LayoutDashboard, show: true },
     { id: 'reorder', label: 'Reorder Items', icon: ClipboardList, show: true },
-    { id: 'import', label: 'Import Data', icon: ScanLine, show: userRole === 'admin' || userRole === 'inventory_manager' },
+    // Staff also get Import Data now — but only the "Record Purchase /
+    // Issue / DC" (inward/outward) mode inside it; the master-catalogue and
+    // bulk-update modes stay admin/inventory-manager only (see ImportData.jsx).
+    { id: 'import', label: 'Import Data', icon: ScanLine, show: userRole === 'admin' || userRole === 'inventory_manager' || userRole === 'staff' },
     { id: 'engineers', label: 'Engineer Issue/Return', icon: HardHat, show: true },
     { id: 'warehouse', label: 'Warehouse Put-away', icon: PackageCheck, show: true },
     { id: 'adjustment', label: 'Stock Adjustment', icon: SlidersHorizontal, show: userRole === 'admin' },
@@ -27,6 +30,9 @@ export default function Navigation({ currentView, onViewChange, userRole, userNa
     { id: 'reports', label: 'Reports', icon: BarChart3, show: true },
     { id: 'valuation', label: 'Inventory Valuation', icon: Wallet, show: userRole === 'admin' || userRole === 'inventory_manager' },
     { id: 'users', label: 'Manage Users', icon: Users, show: userRole === 'admin' },
+    // Everyone can open the Activity Log: admin sees all users' actions
+    // with a per-user filter, everyone else sees only their own trail.
+    { id: 'activity', label: 'Activity Log', icon: History, show: true },
     { id: 'searchlogs', label: 'Search Logs', icon: SearchCheck, show: userRole === 'admin' },
     { id: 'settings', label: 'Settings', icon: SettingsIcon, show: userRole === 'admin' },
     { id: 'danger', label: 'Danger Zone', icon: AlertTriangle, show: userRole === 'admin' },
