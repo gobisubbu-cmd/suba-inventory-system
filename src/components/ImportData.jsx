@@ -1324,6 +1324,39 @@ function SearchableItemSelect({ items, value, onChange }) {
   );
 }
 
+// A DC or Invoice cost differing this much (as a fraction) from the item's
+// catalogue Avg Cost gets flagged as a mismatch worth a second look — a
+// genuine price change, a misread digit during scanning, and a wrong
+// item-match all show up the same way (the number looks off), so this is
+// deliberately a "please check this" flag, not a hard block on recording.
+const COST_MISMATCH_THRESHOLD = 0.15;
+
+// Builds one review-table row for "Record Purchase / Issue / DC", always
+// carrying a usable Unit Cost — the document's own price when it had one,
+// falling back to the matched item's catalogue Avg Cost otherwise — so
+// every DC/Invoice line gets properly valued instead of silently posting at
+// ₹0. Also flags when the document's own price and the catalogue cost
+// disagree by more than COST_MISMATCH_THRESHOLD, so mismatches surface as a
+// visible warning instead of just quietly recording whichever number won.
+function buildMovementRow(r, match) {
+  const docCost = r.avgCost !== undefined && r.avgCost !== null && String(r.avgCost).trim() !== '' ? Number(r.avgCost) : null;
+  const catalogCost = match ? Number(match.avgCost || match.purchaseCost || 0) || null : null;
+  let costMismatch = false;
+  if (docCost !== null && catalogCost) {
+    if (Math.abs(docCost - catalogCost) / catalogCost > COST_MISMATCH_THRESHOLD) costMismatch = true;
+  }
+  return {
+    particulars: r.particulars,
+    partCode: r.partCode || '',
+    quantity: r.quantity ?? '',
+    unitCost: docCost !== null ? docCost : (catalogCost || ''),
+    itemId: match ? match.id : '',
+    remarks: '',
+    costMismatch,
+    catalogCost,
+  };
+}
+
 function MovementImport({ existingItems, userEmail }) {
   const [movementType, setMovementType] = useState('purchase');
   const [rows, setRows] = useState([]);
@@ -1351,7 +1384,13 @@ function MovementImport({ existingItems, userEmail }) {
   const [confirmDuplicate, setConfirmDuplicate] = useState(false);
 
   const movement = MOVEMENT_TYPES.find((m) => m.id === movementType);
-  const showUnitCost = movementType === 'purchase';
+  // Unit Cost used to only show for Purchases — every DC/Invoice-driven
+  // outward sale went unpriced unless the scan happened to pick up a price
+  // column, so Issue/DC movements routinely posted to the ledger with no
+  // value at all. Shown for every movement type now so a DC or Invoice
+  // uploaded with part codes is always properly accounted, not just
+  // purchases.
+  const showUnitCost = true;
   const isReceiving = movement.direction === 'in';
 
   // See OWN_BUSINESS_NAME_HINTS above — a document whose detected party
@@ -1446,14 +1485,7 @@ function MovementImport({ existingItems, userEmail }) {
 
       const withMatches = allMapped.map((r) => {
         const match = findBestMatch(r.particulars, existingItems, r.partCode);
-        return {
-          particulars: r.particulars,
-          partCode: r.partCode || '',
-          quantity: r.quantity ?? '',
-          unitCost: r.avgCost ?? '',
-          itemId: match ? match.id : '',
-          remarks: '',
-        };
+        return buildMovementRow(r, match);
       });
       setRows(withMatches);
       // Auto-pick the movement type and pre-fill reference/party from what
@@ -1529,6 +1561,25 @@ function MovementImport({ existingItems, userEmail }) {
           if (match) {
             updated.itemId = match.id;
             autoMatchedId = match.id;
+          }
+        }
+        // Recompute the catalogue-cost comparison whenever the matched item
+        // or the cost itself changes, so picking a different item (or
+        // fixing a misread price) re-checks the mismatch instead of leaving
+        // a stale flag from the previous match.
+        if (field === 'itemId' || field === 'partCode' || field === 'unitCost') {
+          const matchedItemId = field === 'itemId' ? value : updated.itemId;
+          const matchedItem = matchedItemId ? existingItems.find((it) => it.id === matchedItemId) : null;
+          const catalogCost = matchedItem ? Number(matchedItem.avgCost || matchedItem.purchaseCost || 0) || null : null;
+          const cost = updated.unitCost !== '' && updated.unitCost !== null && updated.unitCost !== undefined ? Number(updated.unitCost) : null;
+          updated.catalogCost = catalogCost;
+          updated.costMismatch = Boolean(
+            cost !== null && catalogCost && Math.abs(cost - catalogCost) / catalogCost > COST_MISMATCH_THRESHOLD
+          );
+          // If a fresh match was found and no cost is entered yet, default
+          // to the catalogue cost rather than leaving it blank.
+          if ((field === 'itemId' || field === 'partCode') && (cost === null || cost === 0) && catalogCost) {
+            updated.unitCost = catalogCost;
           }
         }
         return updated;
@@ -1650,7 +1701,19 @@ function MovementImport({ existingItems, userEmail }) {
         await batch.commit();
       }
 
+      // Cost-mismatch report: rows that recorded fine (so nothing is
+      // blocked), but whose document price disagreed with the catalogue
+      // Avg Cost by more than COST_MISMATCH_THRESHOLD — called out
+      // explicitly so a wrong price/misread digit doesn't just quietly
+      // post to the ledger unnoticed.
+      const mismatched = matched.filter((r) => r.costMismatch);
+
       let message = `Recorded ${recorded} of ${matched.length} matched movement(s).`;
+      if (mismatched.length) {
+        message += ` ⚠️ ${mismatched.length} row(s) recorded but their document cost differs from this item's catalogue Avg Cost by more than ${Math.round(COST_MISMATCH_THRESHOLD * 100)}% — worth double-checking: ${mismatched
+          .map((r) => `${r.particulars} (doc ₹${r.unitCost} vs catalogue ₹${r.catalogCost})`)
+          .join(', ')}.`;
+      }
       if (serviceChargeRows.length) {
         message += ` ${serviceChargeRows.length} service charge row(s) were filed to the Service Charges page (not stock): ${serviceChargeRows
           .map((r) => r.particulars)
@@ -1673,8 +1736,15 @@ function MovementImport({ existingItems, userEmail }) {
       logActivity(
         userEmail,
         `Stock ${movement.direction === 'in' ? 'inward' : 'outward'} (${movement.label || movement.id})`,
-        `Recorded ${recorded} movement(s)${reason.trim() ? ` · ${reason.trim()}` : ''}${supplier.trim() ? ` · ${supplier.trim()}` : ''}${unmatched.length ? ` · ${unmatched.length} unmatched` : ''}`
+        `Recorded ${recorded} movement(s)${reason.trim() ? ` · ${reason.trim()}` : ''}${supplier.trim() ? ` · ${supplier.trim()}` : ''}${unmatched.length ? ` · ${unmatched.length} unmatched` : ''}${mismatched.length ? ` · ${mismatched.length} cost mismatch` : ''}`
       );
+      if (mismatched.length) {
+        logActivity(
+          userEmail,
+          'Cost mismatch on recorded movement',
+          `${reason.trim() || sourceLabel}: ${mismatched.map((r) => `${r.particulars} (doc ₹${r.unitCost} vs catalogue ₹${r.catalogCost})`).join('; ')}`
+        );
+      }
       setRows((prev) => prev.filter((r) => (!matched.includes(r) && !serviceChargeRows.includes(r)) || failed.some((f) => f.includes(r.particulars))));
     } catch (err) {
       setError(err.message);
@@ -1687,10 +1757,13 @@ function MovementImport({ existingItems, userEmail }) {
     <div className="space-y-6">
       <p className="text-gray-500 text-sm max-w-2xl">
         Upload a purchase invoice, delivery challan / sale document, or an Excel/CSV of movement lines. Each row is
-        matched to an existing item by name — review and correct the match, quantity, and (for purchases) unit
-        cost before recording. This updates stock and writes to the ledger, it does not create new items. Rows with
-        no match are saved to the <strong>No-Match Report</strong> tab above so they can be corrected and added to
-        stock later instead of being lost.
+        matched to an existing item by name — review and correct the match, quantity, and unit cost before
+        recording. Every movement (including outward DC/Invoice sales) is always given a cost — the document's own
+        price if it has one, otherwise the item's catalogue Avg Cost — so nothing posts to the ledger unpriced. Rows
+        highlighted amber have a document price that disagrees with the catalogue Avg Cost by more than{' '}
+        {Math.round(COST_MISMATCH_THRESHOLD * 100)}% — worth a second look, but recording is not blocked on it. Rows
+        with no match are saved to the <strong>No-Match Report</strong> tab above so they can be corrected and added
+        to stock later instead of being lost.
       </p>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
@@ -1924,7 +1997,7 @@ function MovementImport({ existingItems, userEmail }) {
               {rows.map((r, idx) => {
                 const existingLocs = existingLocationsByItem[r.itemId] || [];
                 return (
-                <tr key={idx} className="border-b last:border-0">
+                <tr key={idx} className={`border-b last:border-0 ${r.costMismatch ? 'bg-amber-50' : ''}`}>
                   <td className="px-2 py-1">
                     <input
                       type="text"
@@ -1966,8 +2039,14 @@ function MovementImport({ existingItems, userEmail }) {
                         step="0.01"
                         value={r.unitCost}
                         onChange={(e) => updateRow(idx, 'unitCost', e.target.value)}
-                        className="w-24 px-2 py-1 border rounded"
+                        title={r.catalogCost ? `Catalogue Avg Cost: ₹${r.catalogCost}` : ''}
+                        className={`w-24 px-2 py-1 border rounded ${r.costMismatch ? 'border-amber-500 bg-amber-50 text-amber-900 font-semibold' : ''}`}
                       />
+                      {r.costMismatch && (
+                        <div className="text-[10px] text-amber-700 mt-0.5 leading-tight">
+                          ⚠️ Catalogue: ₹{r.catalogCost}
+                        </div>
+                      )}
                     </td>
                   )}
                   {isReceiving && (
