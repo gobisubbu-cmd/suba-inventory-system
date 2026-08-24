@@ -43,6 +43,20 @@ export default function ServiceCharges({ userRole, userEmail }) {
     return unsub;
   }, []);
 
+  // These must run on every render, before any early return below — React
+  // requires hooks to be called in the same order every time, and the
+  // no-permission return further down would otherwise skip them on some
+  // renders and not others.
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return charges;
+    return charges.filter((c) =>
+      [c.referenceNumber, c.customerName, c.notes].filter(Boolean).join(' ').toLowerCase().includes(q)
+    );
+  }, [charges, search]);
+
+  const total = useMemo(() => filtered.reduce((sum, c) => sum + (Number(c.amount) || 0), 0), [filtered]);
+
   if (!canEdit) {
     return (
       <div className="max-w-md mx-auto mt-20 text-center text-gray-500">
@@ -130,16 +144,6 @@ export default function ServiceCharges({ userRole, userEmail }) {
       setError(err.message);
     }
   };
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return charges;
-    return charges.filter((c) =>
-      [c.referenceNumber, c.customerName, c.notes].filter(Boolean).join(' ').toLowerCase().includes(q)
-    );
-  }, [charges, search]);
-
-  const total = useMemo(() => filtered.reduce((sum, c) => sum + (Number(c.amount) || 0), 0), [filtered]);
 
   return (
     <div className="space-y-6">
