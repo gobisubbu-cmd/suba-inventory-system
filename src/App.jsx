@@ -29,6 +29,7 @@ import FieldMode from './components/FieldMode';
 import MobileQuickScan from './components/MobileQuickScan';
 import MobileEngineerIssue from './components/MobileEngineerIssue';
 import ActivityLog from './components/ActivityLog';
+import StockExport from './components/StockExport';
 import { runDailyBackupIfNeeded } from './backup';
 import './index.css';
 
@@ -46,6 +47,9 @@ export default function App() {
     (typeof window !== 'undefined' && window.innerWidth <= 768) ? 'field' : 'dashboard'
   );
   const [userRole, setUserRole] = useState(null);
+  // Brands this user is allowed to export from the Stock Export page —
+  // set per-user by the admin in Manage Users (users/{uid}.exportBrands).
+  const [exportBrands, setExportBrands] = useState([]);
   // Set when a brand name is clicked on the Brands page — carries a
   // "brand::timestamp" token so Dashboard's effect fires even if the same
   // brand is clicked twice in a row. See goToDashboardFiltered below.
@@ -59,8 +63,10 @@ export default function App() {
           const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
           if (userDoc.exists()) {
             setUserRole(userDoc.data().role);
+            setExportBrands(userDoc.data().exportBrands || []);
           } else {
             setUserRole('staff');
+            setExportBrands([]);
           }
         } catch (error) {
           console.error('Error fetching user role:', error);
@@ -197,6 +203,8 @@ export default function App() {
         return <SearchLogs userRole={userRole} />;
       case 'activity':
         return <ActivityLog userRole={userRole} userEmail={user.email} />;
+      case 'stockexport':
+        return <StockExport userRole={userRole} userEmail={user.email} exportBrands={exportBrands} />;
       case 'settings':
         return <Settings userRole={userRole} />;
       case 'warehouse':
@@ -219,6 +227,7 @@ export default function App() {
         onViewChange={setCurrentView}
         userRole={userRole}
         userName={user.email}
+        exportBrands={exportBrands}
       />
       <main className="flex-1 overflow-auto relative">
         {currentView !== 'dashboard' && (

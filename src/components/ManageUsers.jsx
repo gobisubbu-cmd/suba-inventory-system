@@ -19,9 +19,10 @@ import {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
 } from 'firebase/auth';
-import { Users, ShieldAlert, UserPlus, Mail, Lock } from 'lucide-react';
+import { Users, ShieldAlert, UserPlus, Mail, Lock, FileDown } from 'lucide-react';
 import { auth } from '../firebase';
 import { logActivity } from '../lib/activityLog';
+import { fetchBrands } from '../lib/brands';
 
 const ROLES = [
   { id: 'staff', label: 'Staff' },
@@ -42,6 +43,9 @@ export default function ManageUsers({ userRole }) {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [saving, setSaving] = useState(false);
+  const [brandNames, setBrandNames] = useState([]);
+  // Which user's "Stock Export brands" editor is open (user doc id or null).
+  const [exportEditorFor, setExportEditorFor] = useState(null);
 
   useEffect(() => {
     const q = query(collection(db, 'users'), orderBy('email', 'asc'));
@@ -50,6 +54,24 @@ export default function ManageUsers({ userRole }) {
     });
     return unsub;
   }, []);
+
+  useEffect(() => {
+    fetchBrands().then((list) => setBrandNames(list.map((b) => b.name))).catch(() => {});
+  }, []);
+
+  // Grant/revoke one brand in a user's stock-export permission. The list on
+  // users/{uid}.exportBrands drives both the Stock Export page contents and
+  // whether the menu item is visible to that user at all.
+  const toggleExportBrand = async (u, brand) => {
+    const current = Array.isArray(u.exportBrands) ? u.exportBrands : [];
+    const next = current.includes(brand) ? current.filter((b) => b !== brand) : [...current, brand];
+    try {
+      await updateDoc(doc(db, 'users', u.id), { exportBrands: next });
+      logActivity(auth.currentUser?.email, 'Changed stock export permission', `${u.email}: ${next.length ? next.sort().join(', ') : 'none'}`);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
 
   if (userRole !== 'admin') {
     return (
@@ -190,12 +212,14 @@ export default function ManageUsers({ userRole }) {
             <tr>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Email</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Role</th>
+              <th className="text-left px-4 py-3 font-semibold text-gray-600">Stock Export</th>
               <th className="text-left px-4 py-3 font-semibold text-gray-600">Actions</th>
             </tr>
           </thead>
           <tbody>
             {users.map((u) => (
-              <tr key={u.id} className="border-b last:border-0 hover:bg-gray-50">
+              <React.Fragment key={u.id}>
+              <tr className="border-b last:border-0 hover:bg-gray-50">
                 <td className="px-4 py-3">{u.email}</td>
                 <td className="px-4 py-3">
                   {(u.email || '').toLowerCase() === PRIMARY_ADMIN_EMAIL ? (
@@ -216,6 +240,19 @@ export default function ManageUsers({ userRole }) {
                 </td>
                 <td className="px-4 py-3">
                   <button
+                    onClick={() => setExportEditorFor(exportEditorFor === u.id ? null : u.id)}
+                    className={`flex items-center gap-1 text-sm px-3 py-1 rounded-lg border ${
+                      (u.exportBrands || []).length
+                        ? 'bg-emerald-50 border-emerald-300 text-emerald-800 font-semibold'
+                        : 'border-gray-300 text-gray-500'
+                    }`}
+                  >
+                    <FileDown size={14} />
+                    {(u.exportBrands || []).length ? `${u.exportBrands.length} brand(s) allowed` : 'Not allowed'}
+                  </button>
+                </td>
+                <td className="px-4 py-3">
+                  <button
                     onClick={() => handleResetPassword(u)}
                     className="flex items-center gap-1 text-emerald-700 hover:underline text-sm"
                   >
@@ -223,10 +260,40 @@ export default function ManageUsers({ userRole }) {
                   </button>
                 </td>
               </tr>
+              {exportEditorFor === u.id && (
+                <tr className="border-b bg-emerald-50/40">
+                  <td colSpan={4} className="px-4 py-4">
+                    <p className="text-sm font-semibold text-gray-700 mb-2">
+                      Stock Export permission for {u.email} — tick the brands/groups this user may download (Excel/PDF current stock list):
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {brandNames.map((b) => {
+                        const on = (u.exportBrands || []).includes(b);
+                        return (
+                          <label
+                            key={b}
+                            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border cursor-pointer text-sm ${
+                              on ? 'bg-emerald-100 border-emerald-400 text-emerald-800 font-semibold' : 'bg-white border-gray-300 text-gray-600'
+                            }`}
+                          >
+                            <input type="checkbox" checked={on} onChange={() => toggleExportBrand(u, b)} />
+                            {b}
+                          </label>
+                        );
+                      })}
+                      {brandNames.length === 0 && <span className="text-sm text-gray-400">Loading brands...</span>}
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">
+                      Changes save instantly. Untick everything to remove the Stock Export page from this user's menu.
+                    </p>
+                  </td>
+                </tr>
+              )}
+              </React.Fragment>
             ))}
             {users.length === 0 && (
               <tr>
-                <td colSpan={3} className="px-4 py-8 text-center text-gray-400">No users yet.</td>
+                <td colSpan={4} className="px-4 py-8 text-center text-gray-400">No users yet.</td>
               </tr>
             )}
           </tbody>

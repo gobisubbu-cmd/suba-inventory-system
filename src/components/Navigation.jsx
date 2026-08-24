@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { signOut } from 'firebase/auth';
 import { auth } from '../firebase';
-import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat, Smartphone, Database, ChevronDown, ChevronRight, History } from 'lucide-react';
+import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat, Smartphone, Database, ChevronDown, ChevronRight, History, FileDown } from 'lucide-react';
 
 const ROLE_LABELS = {
   staff: 'STAFF',
@@ -9,7 +9,7 @@ const ROLE_LABELS = {
   admin: 'ADMIN',
 };
 
-export default function Navigation({ currentView, onViewChange, userRole, userName }) {
+export default function Navigation({ currentView, onViewChange, userRole, userName, exportBrands }) {
   const handleLogout = async () => {
     await signOut(auth);
   };
@@ -30,6 +30,10 @@ export default function Navigation({ currentView, onViewChange, userRole, userNa
     { id: 'reports', label: 'Reports', icon: BarChart3, show: true },
     { id: 'valuation', label: 'Inventory Valuation', icon: Wallet, show: userRole === 'admin' || userRole === 'inventory_manager' },
     { id: 'users', label: 'Manage Users', icon: Users, show: userRole === 'admin' },
+    // Special permission: appears only for admins and for users the admin
+    // has granted brand-limited stock export rights (exportBrands on the
+    // user's doc, managed from Manage Users).
+    { id: 'stockexport', label: 'Stock Export', icon: FileDown, show: userRole === 'admin' || (exportBrands && exportBrands.length > 0) },
     // Everyone can open the Activity Log: admin sees all users' actions
     // with a per-user filter, everyone else sees only their own trail.
     { id: 'activity', label: 'Activity Log', icon: History, show: true },
