@@ -14,6 +14,7 @@ import {
   orderBy,
   limit,
   updateDoc,
+  deleteDoc,
 } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 import {
@@ -32,6 +33,7 @@ import {
   Coins,
   PackageSearch,
   Layers,
+  Split,
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
@@ -373,7 +375,7 @@ export default function ImportData({ userRole, userEmail }) {
   // (inward/outward) mode — the master-catalogue and bulk-update modes can
   // rewrite the whole item database, so those stay admin/inventory-manager.
   const staffOnly = userRole === 'staff';
-  const [mode, setMode] = useState(staffOnly ? 'movement' : 'newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'bulkCategory' | 'unmatched'
+  const [mode, setMode] = useState(staffOnly ? 'movement' : 'newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'bulkCategory' | 'unmatched' | 'splitBrand'
   const [existingItems, setExistingItems] = useState([]);
   const [pendingUnmatchedCount, setPendingUnmatchedCount] = useState(0);
 
@@ -465,6 +467,16 @@ export default function ImportData({ userRole, userEmail }) {
           )}
         </button>
         </>)}
+        {userRole === 'admin' && (
+          <button
+            onClick={() => setMode('splitBrand')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+              mode === 'splitBrand' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <Split size={16} /> Split Brand by Category
+          </button>
+        )}
       </div>
 
       {mode === 'newItems' && !staffOnly && (
@@ -484,6 +496,9 @@ export default function ImportData({ userRole, userEmail }) {
       )}
       {mode === 'unmatched' && !staffOnly && (
         <UnmatchedImportsPanel existingItems={existingItems} userEmail={userEmail} />
+      )}
+      {mode === 'splitBrand' && userRole === 'admin' && (
+        <SplitBrandByCategory existingItems={existingItems} userEmail={userEmail} />
       )}
     </div>
   );
@@ -2763,6 +2778,227 @@ function BulkCategoryUpdate({ existingItems, userEmail }) {
           />
         </label>
       </div>
+    </div>
+  );
+}
+
+// Split Brand by Category — retires one brand into two, sorted by the
+// existing Category field. Built for splitting RATIONAL into "RATIONAL EQP"
+// (machines) and "RATIONAL SPARES" (parts), so brand-scoped permissions
+// (e.g. Stock Export) can grant just one half — but works for any brand /
+// category pair. Every item under the source brand is reassigned to
+// whichever target brand it belongs to (nothing is left behind), the two
+// target brands are created in the Brands list if they don't exist yet, and
+// the now-empty source brand is removed from that list automatically.
+function SplitBrandByCategory({ existingItems, userEmail }) {
+  const [brands, setBrands] = useState([]);
+  const [sourceBrand, setSourceBrand] = useState('');
+  const [categoryMatch, setCategoryMatch] = useState('');
+  const [brandForMatch, setBrandForMatch] = useState('');
+  const [brandForRest, setBrandForRest] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+  const [confirmText, setConfirmText] = useState('');
+
+  useEffect(() => {
+    fetchBrands().then(setBrands);
+  }, []);
+
+  const sourceItems = useMemo(
+    () => existingItems.filter((it) => it.brand === sourceBrand),
+    [existingItems, sourceBrand]
+  );
+  const matchItems = useMemo(
+    () => sourceItems.filter((it) => (it.category || '').trim() === categoryMatch.trim()),
+    [sourceItems, categoryMatch]
+  );
+  const restItems = useMemo(
+    () => sourceItems.filter((it) => (it.category || '').trim() !== categoryMatch.trim()),
+    [sourceItems, categoryMatch]
+  );
+
+  const ready = sourceBrand && categoryMatch.trim() && brandForMatch.trim() && brandForRest.trim() && sourceItems.length > 0;
+
+  const ensureBrandExists = async (name) => {
+    const exists = brands.some((b) => b.name.toUpperCase() === name.toUpperCase());
+    if (exists) return;
+    await addDoc(collection(db, 'brands'), {
+      name: name.trim().toUpperCase(),
+      createdAt: serverTimestamp(),
+      createdByEmail: userEmail || 'system',
+    });
+  };
+
+  const handleSplit = async () => {
+    setError('');
+    if (!ready) {
+      setError('Fill in every field above first.');
+      return;
+    }
+    if (confirmText.trim().toUpperCase() !== sourceBrand.toUpperCase()) {
+      setError(`Type "${sourceBrand}" in the confirmation box to run the split.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const targetMatch = brandForMatch.trim().toUpperCase();
+      const targetRest = brandForRest.trim().toUpperCase();
+      await ensureBrandExists(targetMatch);
+      await ensureBrandExists(targetRest);
+
+      const CHUNK = 400;
+      const writeGroup = async (items, newBrand) => {
+        for (let i = 0; i < items.length; i += CHUNK) {
+          const batch = writeBatch(db);
+          items.slice(i, i + CHUNK).forEach((it) => {
+            batch.update(doc(db, 'items', it.id), { brand: newBrand, updatedAt: serverTimestamp() });
+          });
+          await batch.commit();
+        }
+      };
+      await writeGroup(matchItems, targetMatch);
+      await writeGroup(restItems, targetRest);
+
+      // The source brand now has zero items left under it (every item was
+      // just reassigned to one of the two targets) — remove the now-empty
+      // entry from the Brands list so it doesn't linger as a dead option in
+      // every brand dropdown across the app. Skip if the source name is
+      // being reused as one of the targets.
+      let removedSourceBrand = false;
+      if (targetMatch !== sourceBrand.toUpperCase() && targetRest !== sourceBrand.toUpperCase()) {
+        const sourceDoc = brands.find((b) => b.name.toUpperCase() === sourceBrand.toUpperCase());
+        if (sourceDoc) {
+          await deleteDoc(doc(db, 'brands', sourceDoc.id));
+          removedSourceBrand = true;
+        }
+      }
+
+      await addDoc(collection(db, 'importHistory'), {
+        brand: `${sourceBrand} → ${targetMatch} / ${targetRest}`,
+        mode: 'splitBrand',
+        fileName: `Category "${categoryMatch.trim()}" → ${targetMatch}, rest → ${targetRest}`,
+        importedByEmail: userEmail || '',
+        importedAt: serverTimestamp(),
+        rowsAdded: 0,
+        rowsUpdated: matchItems.length + restItems.length,
+        rowsSkipped: 0,
+      });
+      logActivity(
+        userEmail,
+        'Split brand by category',
+        `${sourceBrand}: ${matchItems.length} → ${targetMatch}, ${restItems.length} → ${targetRest}${removedSourceBrand ? ` · removed empty "${sourceBrand}" brand` : ''}`
+      );
+
+      setResult({ matched: matchItems.length, rest: restItems.length, targetMatch, targetRest, removedSourceBrand });
+      setSourceBrand('');
+      setCategoryMatch('');
+      setBrandForMatch('');
+      setBrandForRest('');
+      setConfirmText('');
+      fetchBrands().then(setBrands);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 space-y-4">
+      <p className="text-sm text-gray-600 max-w-2xl">
+        Retires one brand into two, split by the existing <strong>Category</strong> field — e.g. RATIONAL into{' '}
+        <strong>RATIONAL EQP</strong> (Equipment) and <strong>RATIONAL SPARES</strong> (everything else), so a Stock
+        Export permission or any other brand-scoped access can be granted to just one half. Every item under the
+        source brand is reassigned — nothing is left behind — and the now-empty source brand is removed from the
+        Brands list automatically.
+      </p>
+
+      <div className="grid sm:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Source Brand *</label>
+          <select value={sourceBrand} onChange={(e) => setSourceBrand(e.target.value)} className="w-full px-3 py-2 border rounded-lg">
+            <option value="">Select brand...</option>
+            {brands.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Category value to split out *</label>
+          <input
+            type="text"
+            value={categoryMatch}
+            onChange={(e) => setCategoryMatch(e.target.value)}
+            placeholder="e.g. Equipment"
+            className="w-full px-3 py-2 border rounded-lg"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            New brand for items matching that category *
+          </label>
+          <input
+            type="text"
+            value={brandForMatch}
+            onChange={(e) => setBrandForMatch(e.target.value)}
+            placeholder="e.g. RATIONAL EQP"
+            className="w-full px-3 py-2 border rounded-lg"
+          />
+          {categoryMatch.trim() && (
+            <p className="text-xs text-gray-400 mt-1">{matchItems.length} item(s) will move here</p>
+          )}
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            New brand for everything else *
+          </label>
+          <input
+            type="text"
+            value={brandForRest}
+            onChange={(e) => setBrandForRest(e.target.value)}
+            placeholder="e.g. RATIONAL SPARES"
+            className="w-full px-3 py-2 border rounded-lg"
+          />
+          {sourceBrand && (
+            <p className="text-xs text-gray-400 mt-1">{restItems.length} item(s) will move here</p>
+          )}
+        </div>
+      </div>
+
+      {ready && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded text-sm">
+          <p className="font-semibold">
+            This reassigns all {sourceItems.length} item(s) currently under {sourceBrand}: {matchItems.length} to{' '}
+            {brandForMatch.trim().toUpperCase()}, {restItems.length} to {brandForRest.trim().toUpperCase()}. This
+            cannot be undone automatically.
+          </p>
+          <p className="mt-2">Type <strong>{sourceBrand}</strong> to confirm:</p>
+          <input
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder={sourceBrand}
+            className="mt-2 px-3 py-1.5 border rounded w-48"
+          />
+        </div>
+      )}
+
+      {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
+
+      {result && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded text-sm">
+          <p className="font-semibold">
+            Done — {result.matched} item(s) moved to {result.targetMatch}, {result.rest} moved to {result.targetRest}.
+          </p>
+          {result.removedSourceBrand && <p className="mt-1">The now-empty source brand was removed from the Brands list.</p>}
+        </div>
+      )}
+
+      <button
+        onClick={handleSplit}
+        disabled={busy || !ready}
+        className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg disabled:opacity-50"
+      >
+        {busy ? 'Splitting...' : 'Split Brand'}
+      </button>
     </div>
   );
 }
