@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { signOut } from 'firebase/auth';
 import { auth } from '../firebase';
-import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat, Smartphone, Database, ChevronDown, ChevronRight, History, FileDown } from 'lucide-react';
+import { LogOut, Home, LayoutDashboard, Boxes, SlidersHorizontal, BarChart3, Wallet, Users, KeyRound, AlertTriangle, ScanLine, PackageSearch, ClipboardList, ShieldCheck, SearchCheck, Settings as SettingsIcon, PackageCheck, Warehouse, Tag, HardHat, Smartphone, Database, ChevronDown, ChevronRight, History, FileDown, Receipt } from 'lucide-react';
 
 const ROLE_LABELS = {
   staff: 'STAFF',
@@ -22,6 +22,10 @@ export default function Navigation({ currentView, onViewChange, userRole, userNa
     // Issue / DC" (inward/outward) mode inside it; the master-catalogue and
     // bulk-update modes stay admin/inventory-manager only (see ImportData.jsx).
     { id: 'import', label: 'Import Data', icon: ScanLine, show: userRole === 'admin' || userRole === 'inventory_manager' || userRole === 'staff' },
+    // Standalone money ledger for service/handling charges billed when no
+    // specific spare was advised — never touches stock. Same access as
+    // Import Data since staff are the ones raising these out in the field.
+    { id: 'servicecharges', label: 'Service Charges', icon: Receipt, show: userRole === 'admin' || userRole === 'inventory_manager' || userRole === 'staff' },
     { id: 'engineers', label: 'Engineer Issue/Return', icon: HardHat, show: true },
     { id: 'warehouse', label: 'Warehouse Put-away', icon: PackageCheck, show: true },
     { id: 'adjustment', label: 'Stock Adjustment', icon: SlidersHorizontal, show: userRole === 'admin' },

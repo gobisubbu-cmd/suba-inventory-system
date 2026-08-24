@@ -30,6 +30,7 @@ import MobileQuickScan from './components/MobileQuickScan';
 import MobileEngineerIssue from './components/MobileEngineerIssue';
 import ActivityLog from './components/ActivityLog';
 import StockExport from './components/StockExport';
+import ServiceCharges from './components/ServiceCharges';
 // Daily in-Firestore backup DISABLED 24 Aug 2026: at 7,700+ items across 18
 // collections it began timing out ("write stream exhausted" / 45s commit
 // timeouts) and, worse, its huge queued writes silently blocked ALL other
@@ -212,6 +213,8 @@ export default function App() {
         return <ActivityLog userRole={userRole} userEmail={user.email} />;
       case 'stockexport':
         return <StockExport userRole={userRole} userEmail={user.email} exportBrands={exportBrands} />;
+      case 'servicecharges':
+        return <ServiceCharges userRole={userRole} userEmail={user.email} />;
       case 'settings':
         return <Settings userRole={userRole} />;
       case 'warehouse':

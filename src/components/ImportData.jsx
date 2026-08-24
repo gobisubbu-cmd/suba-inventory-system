@@ -1551,9 +1551,17 @@ function MovementImport({ existingItems, userEmail }) {
       return;
     }
     const matched = withQty.filter((r) => r.itemId);
-    const unmatched = withQty.filter((r) => !r.itemId);
+    // A "Service Charges" (or similar) line on an invoice/DC isn't a spare
+    // part at all, so it will never match a catalogue item — it used to
+    // land in the No-Match Report and sit there forever since there's no
+    // item to pick for it. Route these straight to the standalone Service
+    // Charges ledger instead, so they're recorded properly the first time.
+    const SERVICE_CHARGE_RE = /service\s*charge|handling\s*charge|visit\s*charge|labou?r\s*charge/i;
+    const allUnmatched = withQty.filter((r) => !r.itemId);
+    const serviceChargeRows = allUnmatched.filter((r) => SERVICE_CHARGE_RE.test(r.particulars || ''));
+    const unmatched = allUnmatched.filter((r) => !SERVICE_CHARGE_RE.test(r.particulars || ''));
 
-    if (matched.length === 0) {
+    if (matched.length === 0 && serviceChargeRows.length === 0) {
       setError('None of these rows are matched to an existing item. Select an item for each row, or add the item first via Manage Items.');
       return;
     }
@@ -1562,6 +1570,25 @@ function MovementImport({ existingItems, userEmail }) {
     let recorded = 0;
     const failed = [];
     try {
+      if (serviceChargeRows.length) {
+        const scBatch = writeBatch(db);
+        serviceChargeRows.forEach((r) => {
+          const qty = Number(r.quantity) || 1;
+          const unitCost = Number(r.unitCost) || 0;
+          const ref = doc(collection(db, 'serviceCharges'));
+          scBatch.set(ref, {
+            date: transactionDate,
+            referenceNumber: reason.trim(),
+            customerName: supplier.trim(),
+            amount: unitCost ? unitCost * qty : qty,
+            notes: r.remarks?.trim() || `Auto-filed from ${sourceLabel || 'import'} (was: ${r.particulars})`,
+            loggedByEmail: userEmail || '',
+            createdAt: serverTimestamp(),
+          });
+        });
+        await scBatch.commit();
+        logActivity(userEmail, 'Auto-filed service charge(s) from import', `${serviceChargeRows.length} row(s) · ${reason.trim()}`);
+      }
       for (const r of matched) {
         try {
           await commitStockMovement({
@@ -1612,6 +1639,11 @@ function MovementImport({ existingItems, userEmail }) {
       }
 
       let message = `Recorded ${recorded} of ${matched.length} matched movement(s).`;
+      if (serviceChargeRows.length) {
+        message += ` ${serviceChargeRows.length} service charge row(s) were filed to the Service Charges page (not stock): ${serviceChargeRows
+          .map((r) => r.particulars)
+          .join(', ')}.`;
+      }
       if (unmatched.length) {
         message += ` ${unmatched.length} row(s) had no matching item and were saved to the No-Match Report for later review: ${unmatched
           .map((r) => r.particulars)
@@ -1631,7 +1663,7 @@ function MovementImport({ existingItems, userEmail }) {
         `Stock ${movement.direction === 'in' ? 'inward' : 'outward'} (${movement.label || movement.id})`,
         `Recorded ${recorded} movement(s)${reason.trim() ? ` · ${reason.trim()}` : ''}${supplier.trim() ? ` · ${supplier.trim()}` : ''}${unmatched.length ? ` · ${unmatched.length} unmatched` : ''}`
       );
-      setRows((prev) => prev.filter((r) => !matched.includes(r) || failed.some((f) => f.includes(r.particulars))));
+      setRows((prev) => prev.filter((r) => (!matched.includes(r) && !serviceChargeRows.includes(r)) || failed.some((f) => f.includes(r.particulars))));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -2514,6 +2546,40 @@ function UnmatchedImportsPanel({ existingItems, userEmail }) {
     }
   };
 
+  // Older rows (like a "Service Charges" line on an invoice) that predate
+  // the auto-filing fix above are stuck here with no real item to match —
+  // this lets someone resolve them properly by moving the row to the
+  // standalone Service Charges ledger instead of forcing a fake stock match.
+  const handleMoveToServiceCharges = async (row) => {
+    setRowBusy((p) => ({ ...p, [row.id]: true }));
+    setRowError((p) => ({ ...p, [row.id]: '' }));
+    try {
+      const qty = Number(row.quantity) || 1;
+      const unitCost = Number(row.unitCost) || 0;
+      await addDoc(collection(db, 'serviceCharges'), {
+        date: row.transactionDate || new Date().toISOString().slice(0, 10),
+        referenceNumber: (row.reason || '').trim(),
+        customerName: (row.supplier || '').trim(),
+        amount: unitCost ? unitCost * qty : qty,
+        notes: `Moved from No-Match Report (was: ${row.extractedName})`,
+        loggedByEmail: userEmail || '',
+        createdAt: serverTimestamp(),
+      });
+      await updateDoc(doc(db, 'unmatchedImports', row.id), {
+        status: 'resolved',
+        resolvedAsServiceCharge: true,
+        resolvedByEmail: userEmail || '',
+        resolvedAt: serverTimestamp(),
+      });
+      logActivity(userEmail, 'Moved No-Match row to Service Charges', `${row.extractedName} · ${row.reason || ''}`);
+      setRowDone((p) => ({ ...p, [row.id]: true }));
+    } catch (err) {
+      setRowError((p) => ({ ...p, [row.id]: err.message || 'Failed to move to Service Charges.' }));
+    } finally {
+      setRowBusy((p) => ({ ...p, [row.id]: false }));
+    }
+  };
+
   const renderRow = (row, isResolved) => (
     <tr key={row.id} className="border-b last:border-0 align-top">
       <td className="px-3 py-2">
@@ -2559,16 +2625,26 @@ function UnmatchedImportsPanel({ existingItems, userEmail }) {
         <td className="px-3 py-2">
           {rowDone[row.id] ? (
             <span className="text-emerald-700 text-xs flex items-center gap-1">
-              <CheckCircle2 size={14} /> Added
+              <CheckCircle2 size={14} /> Done
             </span>
           ) : (
-            <button
-              onClick={() => handleAddToStock(row)}
-              disabled={rowBusy[row.id]}
-              className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold px-3 py-1.5 rounded disabled:opacity-50"
-            >
-              {rowBusy[row.id] ? 'Adding...' : 'Add to Stock'}
-            </button>
+            <div className="flex flex-col gap-1 items-start">
+              <button
+                onClick={() => handleAddToStock(row)}
+                disabled={rowBusy[row.id]}
+                className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold px-3 py-1.5 rounded disabled:opacity-50"
+              >
+                {rowBusy[row.id] ? 'Adding...' : 'Add to Stock'}
+              </button>
+              <button
+                onClick={() => handleMoveToServiceCharges(row)}
+                disabled={rowBusy[row.id]}
+                title="Use this if the row isn't really a spare part — e.g. a Service Charges line on an invoice."
+                className="border border-amber-400 text-amber-800 hover:bg-amber-50 text-xs font-semibold px-3 py-1.5 rounded disabled:opacity-50"
+              >
+                Not a part — move to Service Charges
+              </button>
+            </div>
           )}
           {rowError[row.id] && <div className="text-red-600 text-xs mt-1 max-w-[14rem]">{rowError[row.id]}</div>}
         </td>
@@ -2581,7 +2657,9 @@ function UnmatchedImportsPanel({ existingItems, userEmail }) {
       <p className="text-gray-500 text-sm max-w-2xl">
         Rows from "Record Purchase / Issue / DC" that couldn't be matched to a catalogue item land here instead of
         being lost. Pick the correct item for a row and click <strong>Add to Stock</strong> to commit it — the
-        original quantity, cost, reference number and date from the import are kept.
+        original quantity, cost, reference number and date from the import are kept. If a row isn't actually a spare
+        part (e.g. a Service Charges line on an invoice), use <strong>Not a part — move to Service Charges</strong>
+        instead — new imports now file these automatically, so this is mainly for older stuck rows.
       </p>
 
       <div className="bg-white rounded-lg shadow overflow-x-auto">
