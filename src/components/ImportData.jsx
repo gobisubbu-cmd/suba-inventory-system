@@ -1020,6 +1020,7 @@ async function commitStockMovement({
   transactionDate,
   userEmail,
   sourceLabel,
+  allowNegative,
 }) {
   const movement = MOVEMENT_TYPES.find((m) => m.id === movementId);
   if (!movement) throw new Error('Unknown movement type.');
@@ -1030,6 +1031,7 @@ async function commitStockMovement({
   let committedItemName = '';
   let committedItemCode = '';
   let committedTxnId = '';
+  let wentNegative = false;
 
   await runTransaction(db, async (tx) => {
     const itemRef = doc(db, 'items', itemId);
@@ -1039,7 +1041,10 @@ async function commitStockMovement({
     const delta = movement.direction === 'in' ? qty : -qty;
     const newStock = current + delta;
     if (newStock < 0) {
-      throw new Error(`${itemSnap.data().particulars}: would make stock negative (current ${current}, qty ${qty}).`);
+      if (!allowNegative) {
+        throw new Error(`${itemSnap.data().particulars}: would make stock negative (current ${current}, qty ${qty}).`);
+      }
+      wentNegative = true;
     }
 
     const updates = { currentStock: newStock, updatedAt: serverTimestamp(), masterOnly: false };
@@ -1059,7 +1064,9 @@ async function commitStockMovement({
       unitCost: unitCost ? Number(unitCost) : null,
       reason: String(reason || '').trim() || `Imported from ${sourceLabel || 'file'}`,
       referenceKey,
-      remarks: String(remarks || '').trim(),
+      remarks: [String(remarks || '').trim(), wentNegative ? '(negative-stock override — entered backdated, stock already 0)' : '']
+        .filter(Boolean)
+        .join(' '),
       extractedName: extractedName || '',
       ...(isReceiving ? { supplier: String(supplier || '').trim() } : { customerName: String(supplier || '').trim() }),
       performedByEmail: userEmail || '',
@@ -1409,6 +1416,13 @@ function MovementImport({ existingItems, userEmail }) {
   // stock gets double-counted.
   const [dupMatches, setDupMatches] = useState([]);
   const [confirmDuplicate, setConfirmDuplicate] = useState(false);
+  // Outward movements normally can't push an item's stock below 0 — that
+  // guard catches the common accident (typo'd quantity, wrong item picked).
+  // But a genuine backdated correction (an old invoice/DC only being entered
+  // now, after the item was already sold out some other way) legitimately
+  // needs to go negative to reflect reality. This is an explicit, off-by-
+  // default escape hatch for exactly that case — never auto-enabled.
+  const [allowNegative, setAllowNegative] = useState(false);
 
   const movement = MOVEMENT_TYPES.find((m) => m.id === movementType);
   // Unit Cost used to only show for Purchases — every DC/Invoice-driven
@@ -1694,6 +1708,7 @@ function MovementImport({ existingItems, userEmail }) {
             transactionDate,
             userEmail,
             sourceLabel,
+            allowNegative,
           });
           recorded += 1;
         } catch (err) {
@@ -1997,6 +2012,15 @@ function MovementImport({ existingItems, userEmail }) {
               >
                 {isReceiving ? 'STOCK UP' : 'STOCK DOWN'}
               </span>
+              {!isReceiving && (
+                <label
+                  className="flex items-center gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded-lg px-2 py-1 cursor-pointer"
+                  title="Only for a genuine backdated entry where the item is already at 0 stock some other way — not for normal use."
+                >
+                  <input type="checkbox" checked={allowNegative} onChange={(e) => setAllowNegative(e.target.checked)} />
+                  Allow negative stock (backdated correction)
+                </label>
+              )}
               <button
                 onClick={handleRecord}
                 disabled={busy || (dupMatches.length > 0 && !confirmDuplicate)}
