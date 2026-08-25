@@ -17,6 +17,7 @@ import * as XLSX from 'xlsx';
 import { BarChart3, Download, Maximize2, X, Trash2, ShieldAlert } from 'lucide-react';
 import { daysPending, LOCATION_STATUS } from '../putaway';
 import { computeStockStatus } from '../lib/brands';
+import { logActivity } from '../lib/activityLog';
 
 function toDate(ts) {
   if (!ts) return null;
@@ -48,7 +49,7 @@ function download(filename, rows) {
   XLSX.writeFile(wb, filename);
 }
 
-export default function Reports({ userRole, userEmail }) {
+export default function Reports({ userRole, userEmail, exportBrands }) {
   const isAdmin = userRole === 'admin';
   const [items, setItems] = useState([]);
   const [transactions, setTransactions] = useState([]);
@@ -598,6 +599,37 @@ export default function Reports({ userRole, userEmail }) {
 
   const brands = useMemo(() => Array.from(new Set(items.map((it) => it.brand).filter(Boolean))).sort(), [items]);
 
+  // Current Stock Report is the one report here that's brand-permission
+  // aware: an admin can pick from every brand in the system, but anyone else
+  // (e.g. a supervisor) only sees the brands the admin allowed them in
+  // Manage Users -> Stock Export permission (users/{uid}.exportBrands) — the
+  // same permission that already scopes the standalone Stock Export page.
+  // Reusing it here means one place to grant/revoke a user's brand access
+  // that covers both.
+  const stockReportAllBrands = useMemo(
+    () => [...new Set(items.map((it) => it.brand || 'Unassigned'))].sort(),
+    [items]
+  );
+  const stockReportAllowedBrands = useMemo(
+    () => (isAdmin ? stockReportAllBrands : stockReportAllBrands.filter((b) => (exportBrands || []).includes(b))),
+    [isAdmin, stockReportAllBrands, exportBrands]
+  );
+  const [stockReportBrands, setStockReportBrands] = useState(new Set());
+  useEffect(() => {
+    setStockReportBrands(new Set(stockReportAllowedBrands));
+  }, [stockReportAllowedBrands.join('|')]); // eslint-disable-line react-hooks/exhaustive-deps
+  const toggleStockReportBrand = (b) => {
+    setStockReportBrands((prev) => {
+      const next = new Set(prev);
+      if (next.has(b)) next.delete(b); else next.add(b);
+      return next;
+    });
+  };
+  const stockedItemsForReport = useMemo(
+    () => items.filter((it) => Number(it.currentStock || 0) > 0 && stockReportBrands.has(it.brand || 'Unassigned')),
+    [items, stockReportBrands]
+  );
+
   const exportBrandWise = () => {
     download(
       'brand_wise_inventory.xlsx',
@@ -632,8 +664,10 @@ export default function Reports({ userRole, userEmail }) {
   const exportCurrentStockReport = () => {
     // Only items actually in stock — "Low Stock Report", "Out-of-Stock
     // Report" and "Not Stocked Parts" already cover those statuses on their
-    // own buttons, so this one is purely "what do I currently hold."
-    const stockedItems = items.filter((it) => Number(it.currentStock || 0) > 0);
+    // own buttons, so this one is purely "what do I currently hold." Scoped
+    // to whichever brands are ticked in stockReportBrands (see above) —
+    // for a non-admin that's never more than their allowed exportBrands.
+    const stockedItems = stockedItemsForReport;
     const rows = stockedItems.map((it) => ({
       Brand: it.brand || 'Unassigned',
       'Part Number': it.partNumber || it.partCode || '',
@@ -651,6 +685,7 @@ export default function Reports({ userRole, userEmail }) {
       Status: '',
     });
     download('current_stock_report.xlsx', rows);
+    logActivity(userEmail, 'Current Stock Report export', `${stockedItems.length} item(s) · ${[...stockReportBrands].sort().join(', ') || 'no brands'}`);
   };
 
   const exportInventoryValuation = () => {
@@ -940,7 +975,6 @@ export default function Reports({ userRole, userEmail }) {
         <h2 className="font-semibold text-gray-800">Brand &amp; Master Catalogue Reports</h2>
         <div className="flex flex-wrap gap-3">
           <ReportButton disabled={!dataReady} label="Brand-wise Inventory" onClick={exportBrandWise} />
-          <ReportButton disabled={!dataReady} label="Current Stock Report" onClick={exportCurrentStockReport} />
           <ReportButton disabled={!dataReady} label="Low Stock Report" onClick={() => exportByStatus('Low Stock', 'low_stock_report.xlsx')} />
           <ReportButton disabled={!dataReady} label="Out-of-Stock Report" onClick={() => exportByStatus('Out of Stock', 'out_of_stock_report.xlsx')} />
           <ReportButton disabled={!dataReady} label="Not Stocked Parts" onClick={() => exportByStatus('Not Stocked', 'not_stocked_parts.xlsx')} />
@@ -954,6 +988,46 @@ export default function Reports({ userRole, userEmail }) {
           <ReportButton disabled={!dataReady} label="Old ↔ New Part Number Cross-ref" onClick={exportOldNewPartNumbers} />
         </div>
         {brands.length > 0 && <p className="text-xs text-gray-400">Brands in system: {brands.join(', ')}</p>}
+      </div>
+
+      <div className="bg-white rounded-lg shadow p-6 space-y-4">
+        <h2 className="font-semibold text-gray-800">Current Stock Report — Select Brands</h2>
+        {isAdmin || (exportBrands && exportBrands.length > 0) ? (
+          <>
+            <p className="text-sm text-gray-500 max-w-2xl">
+              Tick the brands to include, then download — only those brands' currently-stocked items go into the file.
+              {!isAdmin && ' You can only pick from the brands the admin has allowed for you.'}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {stockReportAllowedBrands.map((b) => (
+                <label
+                  key={b}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer text-sm ${
+                    stockReportBrands.has(b) ? 'bg-emerald-50 border-emerald-400 text-emerald-800 font-semibold' : 'border-gray-300 text-gray-600'
+                  }`}
+                >
+                  <input type="checkbox" checked={stockReportBrands.has(b)} onChange={() => toggleStockReportBrand(b)} />
+                  {b}
+                </label>
+              ))}
+              {stockReportAllowedBrands.length === 0 && (
+                <span className="text-gray-400 text-sm">No brands available yet.</span>
+              )}
+            </div>
+            <p className="text-sm text-gray-500">{stockedItemsForReport.length} item(s) will be included.</p>
+            <ReportButton
+              disabled={!dataReady || stockReportBrands.size === 0}
+              label="Download Current Stock Report"
+              onClick={exportCurrentStockReport}
+            />
+          </>
+        ) : (
+          <div className="flex items-center gap-2 text-gray-500 text-sm">
+            <ShieldAlert size={18} className="text-gray-400 shrink-0" />
+            You don't have brand access set for this report yet. Ask the admin to allow brands for you in Manage Users
+            (Stock Export permission) — the same setting also unlocks this report.
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">

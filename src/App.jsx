@@ -198,7 +198,7 @@ export default function App() {
       case 'adjustment':
         return <StockAdjustment userRole={userRole} userEmail={user.email} />;
       case 'reports':
-        return <Reports userRole={userRole} userEmail={user.email} />;
+        return <Reports userRole={userRole} userEmail={user.email} exportBrands={exportBrands} />;
       case 'valuation':
         return <InventoryValuation userRole={userRole} />;
       case 'sparesearch':
