@@ -10,24 +10,25 @@
     "eject": "react-scripts eject"
   },
   "dependencies": {
+    "date-fns": "^2.30.0",
+    "firebase": "^10.4.0",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.2",
+    "lucide-react": "^0.263.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.16.0",
-    "firebase": "^10.4.0",
-    "lucide-react": "^0.263.1",
-    "date-fns": "^2.30.0",
     "xlsx": "^0.18.5",
-    "jspdf": "^2.5.1",
-    "jspdf-autotable": "^3.8.2"
+    "xlsx-js-style": "^1.2.0"
   },
   "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.31",
     "react-scripts": "5.0.1",
     "serve": "^14.2.1",
-    "tailwindcss": "^3.3.3",
-    "postcss": "^8.4.31",
-    "autoprefixer": "^10.4.16",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0"
+    "tailwindcss": "^3.3.3"
   },
   "eslintConfig": {
     "extends": [

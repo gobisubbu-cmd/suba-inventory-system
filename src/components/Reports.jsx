@@ -13,7 +13,14 @@ import {
   runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
-import * as XLSX from 'xlsx';
+// xlsx-js-style is a drop-in fork of the plain "xlsx" (SheetJS Community)
+// package with one difference that matters here: it actually writes cell
+// styles (fill colors, bold, etc.) into the .xlsx file on save. Plain
+// "xlsx" silently ignores any `s:` style you set on a cell — the color code
+// below would do nothing with it. Every other XLSX.* call (json_to_sheet,
+// book_new, writeFile, utils...) has the identical API, so nothing else in
+// this file needed to change.
+import * as XLSX from 'xlsx-js-style';
 import { BarChart3, Download, Maximize2, X, Trash2, ShieldAlert } from 'lucide-react';
 import { daysPending, LOCATION_STATUS } from '../putaway';
 import { computeStockStatus } from '../lib/brands';
@@ -38,12 +45,70 @@ function effectiveDate(t) {
   return toDate(t.createdAt);
 }
 
+// Fixed pastel palette, cycled by a hash of the brand name — this means a
+// given brand (e.g. "RATIONAL EQP") always lands on the same color every
+// time, in every report, in every session, rather than a color that shifts
+// depending on which brands happen to appear in a given export. Picked for
+// readability with plain black text on top.
+const BRAND_COLOR_PALETTE = [
+  'FFF2CC', 'D9EAD3', 'CFE2F3', 'F4CCCC', 'EAD1DC',
+  'D9D2E9', 'FCE5CD', 'D0E0E3', 'FCE8B2', 'C9DAF8',
+  'D5A6BD', 'B6D7A8', 'A2C4C9', 'F9CB9C', 'B4A7D6',
+];
+
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash * 31 + str.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function colorForBrand(brand) {
+  const idx = hashString(String(brand || 'Unassigned')) % BRAND_COLOR_PALETTE.length;
+  return BRAND_COLOR_PALETTE[idx];
+}
+
 function download(filename, rows) {
   // json_to_sheet([]) produces a totally blank sheet with no header row at
   // all, which looks exactly like a broken/failed export. Make a genuinely
   // empty result set say so explicitly instead.
   const safeRows = rows && rows.length > 0 ? rows : [{ Note: 'No records found for this report.' }];
   const ws = XLSX.utils.json_to_sheet(safeRows);
+
+  // Brand-wise color coding: any report whose rows include a "Brand" column
+  // gets each row's cells shaded by that row's brand, so scanning a mixed,
+  // multi-brand export is easier at a glance. Reports without a Brand
+  // column (e.g. date-based ledgers, location reports) are left unstyled.
+  const hasBrandColumn = Object.prototype.hasOwnProperty.call(safeRows[0] || {}, 'Brand');
+  const headerKeys = Object.keys(safeRows[0] || {});
+  const colCount = headerKeys.length;
+
+  // Header row: bold with a plain gray fill regardless of brand, so it
+  // always reads as "this is the header" rather than blending into a
+  // brand color.
+  for (let c = 0; c < colCount; c++) {
+    const ref = XLSX.utils.encode_cell({ r: 0, c });
+    if (ws[ref]) {
+      ws[ref].s = {
+        font: { bold: true },
+        fill: { patternType: 'solid', fgColor: { rgb: 'E0E0E0' } },
+      };
+    }
+  }
+
+  if (hasBrandColumn) {
+    safeRows.forEach((row, i) => {
+      const color = colorForBrand(row.Brand);
+      for (let c = 0; c < colCount; c++) {
+        const ref = XLSX.utils.encode_cell({ r: i + 1, c });
+        if (ws[ref]) {
+          ws[ref].s = { fill: { patternType: 'solid', fgColor: { rgb: color } } };
+        }
+      }
+    });
+  }
+
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
   XLSX.writeFile(wb, filename);
