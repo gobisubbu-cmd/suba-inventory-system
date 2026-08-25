@@ -34,6 +34,7 @@ import {
   PackageSearch,
   Layers,
   Split,
+  ClipboardList,
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
@@ -375,7 +376,7 @@ export default function ImportData({ userRole, userEmail }) {
   // (inward/outward) mode — the master-catalogue and bulk-update modes can
   // rewrite the whole item database, so those stay admin/inventory-manager.
   const staffOnly = userRole === 'staff';
-  const [mode, setMode] = useState(staffOnly ? 'movement' : 'newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'bulkCategory' | 'unmatched' | 'splitBrand'
+  const [mode, setMode] = useState(staffOnly ? 'movement' : 'newItems'); // 'newItems' | 'movement' | 'bulkBrand' | 'bulkPrice' | 'bulkCategory' | 'bulkSno' | 'unmatched' | 'splitBrand'
   const [existingItems, setExistingItems] = useState([]);
   const [pendingUnmatchedCount, setPendingUnmatchedCount] = useState(0);
 
@@ -454,6 +455,14 @@ export default function ImportData({ userRole, userEmail }) {
           <Layers size={16} /> Bulk Update Category
         </button>
         <button
+          onClick={() => setMode('bulkSno')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+            mode === 'bulkSno' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <ClipboardList size={16} /> Update by S.No Sheet
+        </button>
+        <button
           onClick={() => setMode('unmatched')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
             mode === 'unmatched' ? 'bg-white shadow text-emerald-700' : 'text-gray-500 hover:text-gray-700'
@@ -493,6 +502,9 @@ export default function ImportData({ userRole, userEmail }) {
       )}
       {mode === 'bulkCategory' && !staffOnly && (
         <BulkCategoryUpdate existingItems={existingItems} userEmail={userEmail} />
+      )}
+      {mode === 'bulkSno' && !staffOnly && (
+        <BulkFieldUpdateBySno existingItems={existingItems} userEmail={userEmail} />
       )}
       {mode === 'unmatched' && !staffOnly && (
         <UnmatchedImportsPanel existingItems={existingItems} userEmail={userEmail} />
@@ -2288,6 +2300,221 @@ function BulkBrandUpdate({ existingItems, userEmail }) {
         <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer w-fit ${busy ? 'bg-gray-300 pointer-events-none' : 'bg-emerald-700 hover:bg-emerald-800'}`}>
           {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
           {busy ? 'Applying...' : 'Upload S.No + Brand File(s)'}
+          <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy} {...MULTI_FILE_PROPS} />
+        </label>
+        <label className={`flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer w-fit border-2 ${busy ? 'border-gray-300 text-gray-400 pointer-events-none' : 'border-emerald-700 text-emerald-700 hover:bg-emerald-50'}`}>
+          <UploadCloud size={16} />
+          Choose Folder
+          <input ref={folderInputRef} type="file" onChange={handleFile} className="hidden" disabled={busy} {...FOLDER_PICKER_PROPS} />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+// Bulk Update Category / Reorder Level by S.No — for edits the user marks
+// up themselves in a spreadsheet this app exported (e.g. "which SINMAG
+// items are Equipment vs Spares", or "set every item's reorder level").
+// Upload a sheet with an S.No column and the chosen field's column filled
+// in; each row is matched to an existing item by its S.No and only that one
+// field is updated — same safe, narrow-write pattern as Bulk Update Brand
+// above, just generalized to any field picked from the dropdown.
+const REORDER_LEVEL_ALIASES = ['reorder level', 'reorder', 'min level', 'minimum stock', 'min stock'];
+const CATEGORY_FIELD_ALIASES = ['category'];
+
+const SNO_FIELD_OPTIONS = [
+  { value: 'category', label: 'Category (e.g. Equipment / Spares)', aliases: CATEGORY_FIELD_ALIASES, kind: 'text' },
+  { value: 'reorderLevel', label: 'Reorder Level', aliases: REORDER_LEVEL_ALIASES, kind: 'number' },
+];
+
+function parseSnoFieldFile(file, aliases) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read that file.'));
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'binary' });
+        for (const name of wb.SheetNames) {
+          const grid = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null });
+          for (let i = 0; i < Math.min(grid.length, 10); i++) {
+            const headerRow = (grid[i] || []).map((h) => normalizeHeader(h));
+            const snoIdx = headerRow.findIndex((h) => SNO_ALIASES.includes(h));
+            const valIdx = headerRow.findIndex((h) => aliases.includes(h));
+            if (snoIdx !== -1 && valIdx !== -1) {
+              const rows = grid
+                .slice(i + 1)
+                .map((r) => ({ sno: r[snoIdx], value: r[valIdx] }))
+                .filter((r) => r.sno !== null && r.sno !== undefined && r.sno !== '');
+              resolve(rows);
+              return;
+            }
+          }
+        }
+        reject(new Error('Could not find both an "S.No" column and the selected field\'s column in this file.'));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.readAsBinaryString(file);
+  });
+}
+
+function BulkFieldUpdateBySno({ existingItems, userEmail }) {
+  const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
+  const [fieldKey, setFieldKey] = useState('category');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+
+  const fieldDef = SNO_FIELD_OPTIONS.find((f) => f.value === fieldKey);
+
+  const handleFile = async (e) => {
+    const allSelected = Array.from(e.target.files || []);
+    const files = allSelected.filter((f) => /\.(xlsx|xls|csv)$/i.test(f.name));
+    const skipped = allSelected.length - files.length;
+    if (!files.length) {
+      if (allSelected.length) setError('No Excel/CSV files found in that selection.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
+      return;
+    }
+    setError('');
+    setResult(null);
+    setBusy(true);
+
+    // Local mutable S.No -> item snapshot, updated as each file is processed
+    // so a second file in the same batch sees the first file's changes
+    // rather than stale pre-batch data (same reasoning as Bulk Update Brand).
+    const bySno = new Map();
+    existingItems.forEach((it) => bySno.set(Number(it.sno), it));
+
+    let updated = 0;
+    let unchanged = 0;
+    let notFound = 0;
+    let leftBlank = 0;
+    let total = 0;
+    const fileErrors = [];
+
+    try {
+      for (const file of files) {
+        try {
+          const rows = await parseSnoFieldFile(file, fieldDef.aliases);
+          total += rows.length;
+          const toWrite = [];
+
+          for (const r of rows) {
+            const sno = Number(r.sno);
+            let value;
+            if (fieldDef.kind === 'number') {
+              const raw = String(r.value ?? '').replace(/,/g, '').trim();
+              const n = Number(raw);
+              if (!raw || !Number.isFinite(n)) {
+                leftBlank += 1;
+                continue;
+              }
+              value = n;
+            } else {
+              value = String(r.value || '').trim();
+              if (!value) {
+                leftBlank += 1;
+                continue;
+              }
+            }
+            const item = bySno.get(sno);
+            if (!item) {
+              notFound += 1;
+              continue;
+            }
+            const current = fieldDef.kind === 'number' ? Number(item[fieldKey] || 0) : (item[fieldKey] || '');
+            if (current === value) {
+              unchanged += 1;
+              continue;
+            }
+            toWrite.push({ id: item.id, sno, value });
+          }
+
+          const batchSize = 400;
+          for (let i = 0; i < toWrite.length; i += batchSize) {
+            const batch = writeBatch(db);
+            toWrite.slice(i, i + batchSize).forEach((w) => {
+              batch.update(doc(db, 'items', w.id), { [fieldKey]: w.value, updatedAt: serverTimestamp() });
+            });
+            await batch.commit();
+            updated += Math.min(batchSize, toWrite.length - i);
+          }
+          toWrite.forEach((w) => bySno.set(w.sno, { ...bySno.get(w.sno), [fieldKey]: w.value }));
+
+          await addDoc(collection(db, 'importHistory'), {
+            brand: 'ALL',
+            mode: `bulkSnoUpdate:${fieldKey}`,
+            fileName: file.name,
+            importedByEmail: userEmail || '',
+            importedAt: serverTimestamp(),
+            rowsAdded: 0,
+            rowsUpdated: toWrite.length,
+            rowsSkipped: rows.length - toWrite.length,
+          });
+          logActivity(userEmail, `Bulk updated ${fieldDef.label} from sheet`, `${file.name}: ${toWrite.length} item(s) updated`);
+        } catch (err) {
+          fileErrors.push(`${file.name}: ${err.message || 'failed to process'}`);
+        }
+      }
+
+      const notes = [];
+      if (fileErrors.length) notes.push(fileErrors.join(' '));
+      if (skipped) notes.push(`${skipped} unsupported file(s) in that selection were skipped.`);
+      if (notes.length) setError(notes.join(' '));
+
+      if (total > 0) {
+        setResult({ updated, unchanged, notFound, leftBlank, total });
+      } else if (!fileErrors.length) {
+        setError(`No rows found under the S.No / ${fieldDef.label} columns.`);
+      }
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 space-y-4">
+      <p className="text-sm text-gray-600 max-w-2xl">
+        Upload a sheet with an <strong>S.No</strong> column and the field's own column filled in — exactly what you
+        get from the matching export (a Reorder Level sheet, or a brand's Category-marking sheet). Each row is
+        matched to an existing item by its S.No and only the field picked below is updated; stock, cost, location,
+        brand and everything else on the item is left exactly as it was. Leave a row's value blank to skip it and
+        finish later.
+      </p>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">Field to update *</label>
+        <select
+          value={fieldKey}
+          onChange={(e) => { setFieldKey(e.target.value); setResult(null); setError(''); }}
+          className="w-full sm:w-80 px-3 py-2 border rounded-lg"
+        >
+          {SNO_FIELD_OPTIONS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+        </select>
+      </div>
+
+      {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
+
+      {result && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded text-sm space-y-1">
+          <p className="font-semibold">Done — {result.updated} item(s) updated.</p>
+          <p>
+            {result.unchanged} already had that value &middot; {result.leftBlank} left blank (skipped)
+            {result.notFound > 0 && <> &middot; {result.notFound} S.No not found (item may have been deleted/renumbered)</>}
+          </p>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3">
+        <label className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg cursor-pointer w-fit ${busy ? 'bg-gray-300 pointer-events-none' : 'bg-emerald-700 hover:bg-emerald-800'}`}>
+          {busy ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
+          {busy ? 'Applying...' : `Upload S.No + ${fieldDef.label} File(s)`}
           <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden" disabled={busy} {...MULTI_FILE_PROPS} />
         </label>
         <label className={`flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer w-fit border-2 ${busy ? 'border-gray-300 text-gray-400 pointer-events-none' : 'border-emerald-700 text-emerald-700 hover:bg-emerald-50'}`}>
