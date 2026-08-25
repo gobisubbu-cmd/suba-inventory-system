@@ -690,6 +690,10 @@ export default function Reports({ userRole, userEmail, exportBrands }) {
       return next;
     });
   };
+  const stockReportAllSelected = stockReportAllowedBrands.length > 0 && stockReportAllowedBrands.every((b) => stockReportBrands.has(b));
+  const toggleAllStockReportBrands = () => {
+    setStockReportBrands(stockReportAllSelected ? new Set() : new Set(stockReportAllowedBrands));
+  };
   const stockedItemsForReport = useMemo(
     () => items.filter((it) => Number(it.currentStock || 0) > 0 && stockReportBrands.has(it.brand || 'Unassigned')),
     [items, stockReportBrands]
@@ -1063,6 +1067,12 @@ export default function Reports({ userRole, userEmail, exportBrands }) {
               Tick the brands to include, then download — only those brands' currently-stocked items go into the file.
               {!isAdmin && ' You can only pick from the brands the admin has allowed for you.'}
             </p>
+            {stockReportAllowedBrands.length > 0 && (
+              <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer w-fit">
+                <input type="checkbox" checked={stockReportAllSelected} onChange={toggleAllStockReportBrands} />
+                {stockReportAllSelected ? 'Deselect all' : 'Select all'}
+              </label>
+            )}
             <div className="flex flex-wrap gap-2">
               {stockReportAllowedBrands.map((b) => (
                 <label

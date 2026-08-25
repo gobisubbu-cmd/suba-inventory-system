@@ -59,6 +59,11 @@ export default function StockExport({ userRole, userEmail, exportBrands }) {
     });
   };
 
+  const allSelected = allowedBrands.length > 0 && allowedBrands.every((b) => selected.has(b));
+  const toggleAll = () => {
+    setSelected(allSelected ? new Set() : new Set(allowedBrands));
+  };
+
   const rows = items
     .filter((it) => selected.has(it.brand || 'Unassigned'))
     .map((it) => ({
@@ -116,7 +121,15 @@ export default function StockExport({ userRole, userEmail, exportBrands }) {
       </p>
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
-        <h2 className="font-semibold text-gray-800">Choose brands / groups</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="font-semibold text-gray-800">Choose brands / groups</h2>
+          {allowedBrands.length > 0 && (
+            <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+              <input type="checkbox" checked={allSelected} onChange={toggleAll} />
+              {allSelected ? 'Deselect all' : 'Select all'}
+            </label>
+          )}
+        </div>
         <div className="flex flex-wrap gap-2">
           {allowedBrands.map((b) => (
             <label
