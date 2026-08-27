@@ -11,6 +11,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { Warehouse, Plus, Pencil, Copy, X, ShieldAlert } from 'lucide-react';
+import { matchesLoose } from '../lib/brands';
 
 function buildLocationCode({ rack, shelf, bin }) {
   return [rack, shelf, bin].filter(Boolean).join('-').toUpperCase();
@@ -132,15 +133,7 @@ export default function LocationMaster({ userRole }) {
     }
   };
 
-  const filtered = locations.filter((l) => {
-    const s = search.trim().toLowerCase();
-    if (!s) return true;
-    return (
-      (l.locationCode || '').toLowerCase().includes(s) ||
-      (l.warehouse || '').toLowerCase().includes(s) ||
-      (l.rack || '').toLowerCase().includes(s)
-    );
-  });
+  const filtered = locations.filter((l) => matchesLoose([l.locationCode, l.warehouse, l.rack], search));
 
   return (
     <div className="space-y-6">

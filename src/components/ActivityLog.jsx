@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query, limit } from 'firebase/firestore';
 import { History } from 'lucide-react';
+import { matchesLoose } from '../lib/brands';
 
 // Per-user activity trail.
 //  - Admin sees everyone's activity with a user filter dropdown.
@@ -35,13 +36,8 @@ export default function ActivityLog({ userRole, userEmail }) {
     } else if (userFilter !== 'All') {
       list = list.filter((l) => l.userEmail === userFilter);
     }
-    const s = search.trim().toLowerCase();
-    if (s) {
-      list = list.filter((l) =>
-        (l.action || '').toLowerCase().includes(s) ||
-        (l.details || '').toLowerCase().includes(s) ||
-        (l.userEmail || '').toLowerCase().includes(s)
-      );
+    if (search.trim()) {
+      list = list.filter((l) => matchesLoose([l.action, l.details, l.userEmail], search));
     }
     return list;
   }, [logs, isAdmin, userEmail, userFilter, search]);

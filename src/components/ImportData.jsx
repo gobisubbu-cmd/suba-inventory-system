@@ -159,7 +159,19 @@ function findBestMatch(name, existingItems, partCode) {
         it.particulars?.trim().toLowerCase().includes(target) ||
         target.includes(it.particulars?.trim().toLowerCase())
     );
-    return match || null;
+    if (match) return match;
+    // Loose fallback — ignore spacing/hyphen differences, e.g. a scanned
+    // name of "Safety temp limiter LM1-LM2" should still find a catalogue
+    // entry stored as "Safety temp limiter LM1 LM2".
+    const looseTarget = normalizeForLooseMatch(target);
+    if (looseTarget.length >= 5) {
+      match = existingItems.find((it) => {
+        const loosePart = normalizeForLooseMatch(it.particulars);
+        return loosePart.length >= 5 && (loosePart.includes(looseTarget) || looseTarget.includes(loosePart));
+      });
+      if (match) return match;
+    }
+    return null;
   };
   const tryMatchByPartNumber = (code) => {
     if (!code) return null;

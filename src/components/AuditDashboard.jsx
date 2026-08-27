@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 import { ClipboardList, Download, ShieldAlert, Users, SearchX, CalendarDays } from 'lucide-react';
+import { matchesLoose } from '../lib/brands';
 
 export default function AuditDashboard({ userRole, userEmail }) {
   const [logs, setLogs] = useState([]);
@@ -58,9 +59,9 @@ export default function AuditDashboard({ userRole, userEmail }) {
       const ts = log.createdAt && log.createdAt.toDate ? log.createdAt.toDate() : null;
       if (fromDate && ts && ts < new Date(fromDate + 'T00:00:00')) return false;
       if (toDate && ts && ts > new Date(toDate + 'T23:59:59')) return false;
-      if (filterUser && !(log.userEmail || '').toLowerCase().includes(filterUser.toLowerCase())) return false;
-      if (filterCustomer && !(log.customerName || '').toLowerCase().includes(filterCustomer.toLowerCase())) return false;
-      if (filterTerm && !(log.searchTerm || '').toLowerCase().includes(filterTerm.toLowerCase())) return false;
+      if (filterUser && !matchesLoose([log.userEmail], filterUser)) return false;
+      if (filterCustomer && !matchesLoose([log.customerName], filterCustomer)) return false;
+      if (filterTerm && !matchesLoose([log.searchTerm], filterTerm)) return false;
       return true;
     });
   }, [logs, fromDate, toDate, filterUser, filterCustomer, filterTerm]);

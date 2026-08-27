@@ -13,6 +13,7 @@ import {
 } from 'firebase/firestore';
 import { Wallet, Plus, Pencil, Trash2, X, ShieldAlert, IndianRupee } from 'lucide-react';
 import { logActivity } from '../lib/activityLog';
+import { matchesLoose } from '../lib/brands';
 
 // Service charges are money collected on a supply (e.g. "no specific spare
 // was advised, so a flat visit/handling charge was billed instead") — they
@@ -48,11 +49,9 @@ export default function ServiceCharges({ userRole, userEmail }) {
   // no-permission return further down would otherwise skip them on some
   // renders and not others.
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = search.trim();
     if (!q) return charges;
-    return charges.filter((c) =>
-      [c.referenceNumber, c.customerName, c.notes].filter(Boolean).join(' ').toLowerCase().includes(q)
-    );
+    return charges.filter((c) => matchesLoose([c.referenceNumber, c.customerName, c.notes], q));
   }, [charges, search]);
 
   const total = useMemo(() => filtered.reduce((sum, c) => sum + (Number(c.amount) || 0), 0), [filtered]);

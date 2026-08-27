@@ -81,19 +81,15 @@ export function normalizeForLooseMatch(s) {
   return String(s || '').toLowerCase().replace(/[\s-]+/g, '');
 }
 
-export function matchesSearch(item, term) {
+// Generic loose matcher for ANY record — not just catalogue items. Every
+// search box / dropdown filter in the app (Warehouse, Location Master,
+// Activity Log, Audit Dashboard, Service Charges, etc.) should build its
+// list of searchable field values and pass it through this, rather than
+// hand-rolling its own strict `.includes()` check — that's how a search box
+// quietly ends up unable to find "SC-118" when someone types "SC118".
+export function matchesLoose(haystacks, term) {
   const t = String(term || '').trim().toLowerCase();
   if (!t) return true;
-  const haystacks = [
-    item.brand,
-    item.particulars,
-    item.description,
-    item.category,
-    item.supplier,
-    item.machineModels,
-    computeStockStatus(item),
-    ...allPartNumbers(item),
-  ];
   // Precise pass first (keeps exact behavior for anyone relying on it).
   if (haystacks.some((h) => String(h || '').toLowerCase().includes(t))) return true;
   // Loose fallback: ignore spacing/hyphen differences, e.g. typing "SM401"
@@ -101,4 +97,22 @@ export function matchesSearch(item, term) {
   const looseTerm = normalizeForLooseMatch(t);
   if (!looseTerm) return false;
   return haystacks.some((h) => normalizeForLooseMatch(h).includes(looseTerm));
+}
+
+export function matchesSearch(item, term) {
+  return matchesLoose(
+    [
+      item.brand,
+      item.particulars,
+      item.description,
+      item.category,
+      item.supplier,
+      item.machineModels,
+      item.hsnCode,
+      item.rackNo,
+      computeStockStatus(item),
+      ...allPartNumbers(item),
+    ],
+    term
+  );
 }

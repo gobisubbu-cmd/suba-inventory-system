@@ -9,7 +9,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { Search, UserCheck, PlusCircle, PackageSearch, AlertCircle, CheckCircle2 } from 'lucide-react';
-import { computeStockStatus, STOCK_STATUS_STYLES, allPartNumbers } from '../lib/brands';
+import { computeStockStatus, STOCK_STATUS_STYLES, matchesSearch } from '../lib/brands';
 
 // A random ID for this browser session, so audit records can be grouped
 const SESSION_ID = Math.random().toString(36).slice(2, 10).toUpperCase();
@@ -96,22 +96,11 @@ export default function SpareSearch({ userRole, userEmail }) {
     setSearching(true);
     const started = Date.now();
 
-    const lower = term.toLowerCase();
-    const matches = items.filter((item) => {
-      const haystacks = [
-        item.particulars,
-        item.description,
-        item.hsnCode,
-        item.rackNo,
-        item.brand,
-        item.category,
-        item.supplier,
-        item.machineModels,
-        computeStockStatus(item),
-        ...allPartNumbers(item),
-      ];
-      return haystacks.some((h) => String(h || '').toLowerCase().includes(lower));
-    });
+    // Shared app-wide matcher: exact substring first, then a loose pass
+    // ignoring spaces/hyphens (already covers particulars, description,
+    // hsnCode, rackNo, brand, category, supplier, machineModels, stock
+    // status, and every current/old part number).
+    const matches = items.filter((item) => matchesSearch(item, term));
     setResults(matches);
 
     // Write immutable audit record — every search is logged, no exceptions

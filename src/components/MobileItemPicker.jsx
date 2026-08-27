@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Search, X, Check, ChevronDown } from 'lucide-react';
+import { matchesSearch } from '../lib/brands';
 
 // Full-screen search-and-pick overlay, built for a phone: a plain <select>
 // with hundreds of parts in it is unusable on a small touch keyboard, and a
@@ -21,24 +22,13 @@ export default function MobileItemPicker({ items, value, onChange, placeholder =
   }, [open]);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = query.trim();
     const sorted = [...items].sort((a, b) => (a.particulars || '').localeCompare(b.particulars || ''));
     if (!q) return sorted.slice(0, 60);
-    return sorted
-      .filter((it) => {
-        const hay = [
-          it.particulars,
-          it.brand,
-          it.partNumber,
-          it.partCode,
-          ...(Array.isArray(it.oldPartNumbers) ? it.oldPartNumbers : []),
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase();
-        return hay.includes(q);
-      })
-      .slice(0, 60);
+    // Same matcher as everywhere else in the app: exact substring first,
+    // then a loose pass ignoring spaces/hyphens — so "TS 118" on a phone
+    // keyboard still finds a part stored as "TS-118".
+    return sorted.filter((it) => matchesSearch(it, q)).slice(0, 60);
   }, [items, query]);
 
   return (

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { ScanLine, HardHat, Search, Smartphone, X } from 'lucide-react';
-import { computeStockStatus } from '../lib/brands';
+import { computeStockStatus, matchesSearch } from '../lib/brands';
 
 // Field Mode: the deliberately small, phone-first landing page. The
 // desktop app's dense sidebar of 15+ pages doesn't work well on a phone —
@@ -86,14 +86,11 @@ function QuickStockCheck() {
   }, []);
 
   const results = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = query.trim();
     if (q.length < 2) return [];
-    return items
-      .filter((it) => {
-        const hay = [it.particulars, it.brand, it.partNumber, it.partCode].filter(Boolean).join(' ').toLowerCase();
-        return hay.includes(q);
-      })
-      .slice(0, 20);
+    // Loose matcher (same as Dashboard/Import Data) so a quick field lookup
+    // also finds old part numbers and tolerates "TS118" vs "TS-118".
+    return items.filter((it) => matchesSearch(it, q)).slice(0, 20);
   }, [items, query]);
 
   return (

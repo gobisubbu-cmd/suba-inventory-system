@@ -13,6 +13,7 @@ import {
   Search,
 } from 'lucide-react';
 import { LOCATION_STATUS, ageingColour, daysPending, applyLocationAllocation } from '../putaway';
+import { matchesLoose } from '../lib/brands';
 
 function toDate(ts) {
   if (!ts) return null;
@@ -54,21 +55,15 @@ export default function Warehouse({ userRole, userEmail }) {
 
   const itemsById = useMemo(() => Object.fromEntries(items.map((it) => [it.id, it])), [items]);
 
-  const matchesSearch = (line) => {
-    const s = search.trim().toLowerCase();
-    if (!s) return true;
-    const locCodes = (line.allocations || []).map((a) => a.locationCode).join(' ').toLowerCase();
-    return (
-      (line.invoiceNumber || '').toLowerCase().includes(s) ||
-      (line.supplier || '').toLowerCase().includes(s) ||
-      (line.description || '').toLowerCase().includes(s) ||
-      String(line.itemCode || '').toLowerCase().includes(s) ||
-      (line.status || '').toLowerCase().includes(s) ||
-      locCodes.includes(s)
+  const matchesLine = (line) => {
+    const locCodes = (line.allocations || []).map((a) => a.locationCode).join(' ');
+    return matchesLoose(
+      [line.invoiceNumber, line.supplier, line.description, line.itemCode, line.status, locCodes],
+      search
     );
   };
 
-  const filteredLines = useMemo(() => lines.filter(matchesSearch), [lines, search]);
+  const filteredLines = useMemo(() => lines.filter(matchesLine), [lines, search]);
   const pendingLines = useMemo(
     () => filteredLines.filter((l) => l.status !== LOCATION_STATUS.COMPLETE),
     [filteredLines]

@@ -9,7 +9,7 @@
 
 import * as XLSX from 'xlsx';
 import { SCAN_BACKEND_URL } from '../scanConfig';
-import { allPartNumbers } from './brands';
+import { allPartNumbers, normalizeForLooseMatch } from './brands';
 
 export const FIELD_ALIASES = {
   particulars: ['particulars', 'particular', 'item', 'item name', 'name', 'part name', 'material', 'description'],
@@ -122,7 +122,18 @@ export function findBestMatch(name, existingItems, partCode) {
         it.particulars?.trim().toLowerCase().includes(target) ||
         target.includes(it.particulars?.trim().toLowerCase())
     );
-    return match || null;
+    if (match) return match;
+    // Loose fallback — ignore spacing/hyphen differences, same as the
+    // desktop Import Data flow.
+    const looseTarget = normalizeForLooseMatch(target);
+    if (looseTarget.length >= 5) {
+      match = existingItems.find((it) => {
+        const loosePart = normalizeForLooseMatch(it.particulars);
+        return loosePart.length >= 5 && (loosePart.includes(looseTarget) || looseTarget.includes(loosePart));
+      });
+      if (match) return match;
+    }
+    return null;
   };
   const tryMatchByPartNumber = (code) => {
     if (!code) return null;
@@ -142,6 +153,19 @@ export function findBestMatch(name, existingItems, partCode) {
         codesOf(it).some(
           (pn) => pn.length >= 5 && (pn.includes(target) || target.includes(pn))
         )
+      );
+      if (match) return match;
+    }
+    // Loose fallback — ignore spacing/hyphen differences, e.g. a document
+    // typed as "TS 118" or "TS118" should still find a catalogue code
+    // stored as "TS-118".
+    const looseTarget = normalizeForLooseMatch(target);
+    if (looseTarget.length >= 3) {
+      match = existingItems.find((it) =>
+        codesOf(it).some((pn) => {
+          const loosePn = normalizeForLooseMatch(pn);
+          return loosePn.length >= 3 && (loosePn.includes(looseTarget) || looseTarget.includes(loosePn));
+        })
       );
       if (match) return match;
     }

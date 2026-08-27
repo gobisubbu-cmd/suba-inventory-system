@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { ClipboardList, ChevronDown, ChevronRight, AlertTriangle, PackageX } from 'lucide-react';
-import { computeStockStatus, STOCK_STATUS_STYLES } from '../lib/brands';
+import { computeStockStatus, STOCK_STATUS_STYLES, matchesSearch } from '../lib/brands';
 import { groupByCategory } from '../lib/categorize';
 
 // Dedicated "needs reordering" page (Low Stock + Out of Stock items),
@@ -38,14 +38,9 @@ export default function ReorderItems({ userRole }) {
   }, [needsReorder]);
 
   const filtered = useMemo(() => {
-    const s = search.trim().toLowerCase();
     return needsReorder.filter((it) => {
       if (brandFilter !== 'All' && (it.brand || 'Unassigned') !== brandFilter) return false;
-      if (!s) return true;
-      return (
-        (it.particulars || '').toLowerCase().includes(s) ||
-        (it.partNumber || it.partCode || '').toLowerCase().includes(s)
-      );
+      return matchesSearch(it, search);
     });
   }, [needsReorder, brandFilter, search]);
 
