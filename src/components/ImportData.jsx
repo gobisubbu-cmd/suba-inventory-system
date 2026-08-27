@@ -39,7 +39,7 @@ import {
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
 import { createPutawayLine, getExistingLocationsForItem } from '../putaway';
-import { fetchBrands, ensureSeedBrands, allPartNumbers } from '../lib/brands';
+import { fetchBrands, ensureSeedBrands, allPartNumbers, matchesSearch, normalizeForLooseMatch } from '../lib/brands';
 import { logActivity } from '../lib/activityLog';
 
 const FIELD_ALIASES = {
@@ -185,6 +185,19 @@ function findBestMatch(name, existingItems, partCode) {
         codesOf(it).some(
           (pn) => pn.length >= 5 && (pn.includes(target) || target.includes(pn))
         )
+      );
+      if (match) return match;
+    }
+    // 3) loose match — ignore spacing/hyphen differences, e.g. a document
+    // typed as "TS 118" or "TS118" should still find a catalogue code
+    // stored as "TS-118". Same normalization Dashboard search already uses.
+    const looseTarget = normalizeForLooseMatch(target);
+    if (looseTarget.length >= 3) {
+      match = existingItems.find((it) =>
+        codesOf(it).some((pn) => {
+          const loosePn = normalizeForLooseMatch(pn);
+          return loosePn.length >= 3 && (loosePn.includes(looseTarget) || looseTarget.includes(loosePn));
+        })
       );
       if (match) return match;
     }
@@ -1288,17 +1301,13 @@ function SearchableItemSelect({ items, value, onChange }) {
   }, [open]);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = query.trim();
     if (!q) return items.slice(0, 50);
-    return items
-      .filter((it) => {
-        const hay = [it.particulars, it.brand, it.partNumber, it.partCode, ...(it.oldPartNumbers || [])]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase();
-        return hay.includes(q);
-      })
-      .slice(0, 50);
+    // Same matcher Dashboard search uses: an exact-substring pass first,
+    // then a loose pass that ignores spacing/hyphen differences — so typing
+    // "TS 118" (or "TS118") still finds an item stored as "TS-118", instead
+    // of only matching whichever exact punctuation style was typed in.
+    return items.filter((it) => matchesSearch(it, q)).slice(0, 50);
   }, [items, query]);
 
   return (
