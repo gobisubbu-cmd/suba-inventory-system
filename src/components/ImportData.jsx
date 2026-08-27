@@ -35,6 +35,7 @@ import {
   Layers,
   Split,
   ClipboardList,
+  XCircle,
 } from 'lucide-react';
 import { SCAN_BACKEND_URL } from '../scanConfig';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
@@ -330,7 +331,7 @@ function mapAiDocumentMeta(docInfo) {
   };
 }
 
-async function extractRowsFromFile(file) {
+async function extractRowsFromFile(file, signal) {
   const isSpreadsheet = /\.(xlsx|xls|csv)$/i.test(file.name);
   const isPdf = file.type === 'application/pdf';
   const isImage = file.type.startsWith('image/');
@@ -363,11 +364,17 @@ async function extractRowsFromFile(file) {
     if (!SCAN_BACKEND_URL || SCAN_BACKEND_URL.includes('YOUR-')) {
       throw new Error('The AI scanning backend is not configured yet.');
     }
+    if (signal?.aborted) {
+      const abortErr = new Error('Cancelled by user.');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
     const base64Data = await fileToBase64(file);
     const response = await fetch(`${SCAN_BACKEND_URL}/api/extract`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ mimeType: file.type || 'application/pdf', base64Data }),
+      signal,
     });
     const data = await response.json();
     if (!response.ok) {
@@ -555,6 +562,8 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
   const [detectedMeta, setDetectedMeta] = useState(null);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
+  const cancelledRef = useRef(false);
+  const abortControllerRef = useRef(null);
 
   useEffect(() => {
     ensureSeedBrands(userEmail).then(() => fetchBrands().then(setBrands));
@@ -590,20 +599,27 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
     setDetectedMeta(null);
     setSourceLabel(files.length === 1 ? files[0].name : `${files.length} files (${files.map((f) => f.name).join(', ')})`);
     setBusy(true);
+    cancelledRef.current = false;
     const allRows = [];
     let firstMeta = null;
     const fileErrors = [];
     try {
       for (const file of files) {
+        if (cancelledRef.current) break;
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
         try {
-          const { rows: mapped, meta } = await extractRowsFromFile(file);
+          const { rows: mapped, meta } = await extractRowsFromFile(file, controller.signal);
           allRows.push(...mapped);
           if (!firstMeta && meta) firstMeta = meta;
         } catch (err) {
+          if (err.name === 'AbortError' || cancelledRef.current) break;
           fileErrors.push(`${file.name}: ${err.message || 'failed to read'}`);
         }
       }
-      if (allRows.length === 0) {
+      if (cancelledRef.current) {
+        setError(allRows.length ? `Cancelled — kept ${allRows.length} row(s) read before cancelling.` : 'Cancelled.');
+      } else if (allRows.length === 0) {
         setError(fileErrors.length ? fileErrors.join(' ') : 'No recognizable item rows found in that file.');
       } else {
         const notes = [];
@@ -615,9 +631,16 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
       setDetectedMeta(firstMeta);
     } finally {
       setBusy(false);
+      cancelledRef.current = false;
+      abortControllerRef.current = null;
       if (fileInputRef.current) fileInputRef.current.value = '';
       if (folderInputRef.current) folderInputRef.current.value = '';
     }
+  };
+
+  const handleCancel = () => {
+    cancelledRef.current = true;
+    abortControllerRef.current?.abort();
   };
 
   const updateRow = (idx, field, value) => {
@@ -912,6 +935,13 @@ function NewItemsImport({ existingItems, userEmail, onSuggestMovement }) {
           {busy && (
             <span className="text-sm text-emerald-700 flex items-center gap-2">
               <Loader2 size={16} className="animate-spin" /> Processing {sourceLabel}...
+              <button
+                type="button"
+                onClick={handleCancel}
+                className="flex items-center gap-1 text-red-600 hover:text-red-800 font-medium"
+              >
+                <XCircle size={16} /> Cancel
+              </button>
             </span>
           )}
         </div>
@@ -1430,6 +1460,8 @@ function MovementImport({ existingItems, userEmail }) {
   const [transactionDate, setTransactionDate] = useState(new Date().toISOString().slice(0, 10));
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
+  const cancelUploadRef = useRef(false);
+  const abortControllerRef = useRef(null);
 
   // Duplicate-reference guard: if this reference/invoice number was already
   // used on a previous recorded movement, warn before letting it happen
@@ -1516,6 +1548,7 @@ function MovementImport({ existingItems, userEmail }) {
     setSourceLabel(label);
     setReason(files.length === 1 ? files[0].name.replace(/\.[^/.]+$/, '') : label);
     setBusy(true);
+    cancelUploadRef.current = false;
     // Multiple files are treated as pages of ONE document — rows from every
     // file are combined into a single review table, but reference/party/date
     // auto-fill below only comes from the FIRST file's detected metadata, so
@@ -1528,19 +1561,28 @@ function MovementImport({ existingItems, userEmail }) {
     const fileErrors = [];
     try {
       for (const file of files) {
+        if (cancelUploadRef.current) break;
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
         try {
-          const { rows: mapped, meta } = await extractRowsFromFile(file);
+          const { rows: mapped, meta } = await extractRowsFromFile(file, controller.signal);
           allMapped.push(...mapped);
           if (!firstMeta && meta) firstMeta = meta;
         } catch (err) {
+          if (err.name === 'AbortError' || cancelUploadRef.current) break;
           fileErrors.push(`${file.name}: ${err.message || 'failed to read'}`);
         }
+      }
+      if (cancelUploadRef.current && allMapped.length === 0) {
+        setError('Cancelled.');
+        return;
       }
       if (allMapped.length === 0) {
         setError(fileErrors.length ? fileErrors.join(' ') : 'No recognizable item rows found in that file.');
         return;
       }
       const notes = [];
+      if (cancelUploadRef.current) notes.push(`Cancelled — kept ${allMapped.length} row(s) read before cancelling.`);
       if (fileErrors.length) notes.push(`${fileErrors.length} of ${files.length} file(s) could not be read: ${fileErrors.join(' ')}`);
       if (skipped) notes.push(`${skipped} unsupported file(s) in that selection were skipped.`);
       if (notes.length) setError(notes.join(' '));
@@ -1601,9 +1643,16 @@ function MovementImport({ existingItems, userEmail }) {
       setError(err.message || 'Failed to read that file.');
     } finally {
       setBusy(false);
+      cancelUploadRef.current = false;
+      abortControllerRef.current = null;
       if (fileInputRef.current) fileInputRef.current.value = '';
       if (folderInputRef.current) folderInputRef.current.value = '';
     }
+  };
+
+  const handleCancel = () => {
+    cancelUploadRef.current = true;
+    abortControllerRef.current?.abort();
   };
 
   const updateRow = (idx, field, value) => {
@@ -1891,6 +1940,13 @@ function MovementImport({ existingItems, userEmail }) {
           {busy && (
             <span className="text-sm text-emerald-700 flex items-center gap-2">
               <Loader2 size={16} className="animate-spin" /> Processing {sourceLabel}...
+              <button
+                type="button"
+                onClick={handleCancel}
+                className="flex items-center gap-1 text-red-600 hover:text-red-800 font-medium"
+              >
+                <XCircle size={16} /> Cancel
+              </button>
             </span>
           )}
         </div>
@@ -2856,6 +2912,8 @@ function BulkCategoryUpdate({ existingItems, userEmail }) {
   const [category, setCategory] = useState('');
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
+  const cancelUploadRef = useRef(false);
+  const abortControllerRef = useRef(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
@@ -2865,6 +2923,11 @@ function BulkCategoryUpdate({ existingItems, userEmail }) {
   }, []);
 
   const brandItems = useMemo(() => existingItems.filter((it) => it.brand === brand), [existingItems, brand]);
+
+  const handleCancel = () => {
+    cancelUploadRef.current = true;
+    abortControllerRef.current?.abort();
+  };
 
   const handleFile = async (e) => {
     const allSelected = Array.from(e.target.files || []);
@@ -2887,6 +2950,7 @@ function BulkCategoryUpdate({ existingItems, userEmail }) {
       return;
     }
     setBusy(true);
+    cancelUploadRef.current = false;
     const catValue = category.trim();
     let matched = 0;
     let alreadySet = 0;
@@ -2897,8 +2961,11 @@ function BulkCategoryUpdate({ existingItems, userEmail }) {
 
     try {
       for (const file of files) {
+        if (cancelUploadRef.current) break;
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
         try {
-          const { rows } = await extractRowsFromFile(file);
+          const { rows } = await extractRowsFromFile(file, controller.signal);
           total += rows.length;
           const toWrite = [];
           for (const r of rows) {
@@ -2936,11 +3003,13 @@ function BulkCategoryUpdate({ existingItems, userEmail }) {
             rowsSkipped: rows.length - uniqueIds.length,
           });
         } catch (err) {
+          if (err.name === 'AbortError' || cancelUploadRef.current) break;
           fileErrors.push(`${file.name}: ${err.message || 'failed to process'}`);
         }
       }
 
       const notes = [];
+      if (cancelUploadRef.current) notes.push(`Cancelled — kept results from file(s) already processed.`);
       if (fileErrors.length) notes.push(fileErrors.join(' '));
       if (skipped) notes.push(`${skipped} unsupported file(s) in that selection were skipped.`);
       if (notes.length) setError(notes.join(' '));
@@ -2948,11 +3017,13 @@ function BulkCategoryUpdate({ existingItems, userEmail }) {
       if (total > 0) {
         setResult({ matched, alreadySet, notMatched, notMatchedNames, total, category: catValue, brand });
         logActivity(userEmail, 'Bulk category update', `${brand}: ${matched} item(s) set to "${catValue}"${notMatched ? `, ${notMatched} not matched` : ''}`);
-      } else if (!fileErrors.length) {
+      } else if (!fileErrors.length && !cancelUploadRef.current) {
         setError('No recognizable item rows found in that file.');
       }
     } finally {
       setBusy(false);
+      cancelUploadRef.current = false;
+      abortControllerRef.current = null;
       if (fileInputRef.current) fileInputRef.current.value = '';
       if (folderInputRef.current) folderInputRef.current.value = '';
     }
@@ -3037,6 +3108,15 @@ function BulkCategoryUpdate({ existingItems, userEmail }) {
             {...MULTI_FILE_PROPS}
           />
         </label>
+        {busy && (
+          <button
+            type="button"
+            onClick={handleCancel}
+            className="flex items-center gap-1 text-red-600 hover:text-red-800 font-medium text-sm"
+          >
+            <XCircle size={16} /> Cancel
+          </button>
+        )}
         <label className={`flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer w-fit border-2 ${busy || !brand || !category.trim() ? 'border-gray-300 text-gray-400 pointer-events-none' : 'border-emerald-700 text-emerald-700 hover:bg-emerald-50'}`}>
           <UploadCloud size={16} />
           Choose Folder
