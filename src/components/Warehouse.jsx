@@ -364,20 +364,21 @@ function PendingLocationTable({ lines, locations, canEdit, userEmail }) {
 
   const submitAllocate = async (line) => {
     setError('');
-    if (!allocLocation) {
-      setError('Choose a location.');
+    const code = allocLocation.trim().toUpperCase();
+    if (!code) {
+      setError('Type a location code.');
       return;
     }
     setBusy(true);
     try {
       await applyLocationAllocation({
         line,
-        locationCode: allocLocation,
+        locationCode: code,
         qty: allocQty,
         userEmail,
         action: 'LOCATION_CHANGE',
       });
-      setSuccess(`Allocated ${allocQty} to ${allocLocation}.`);
+      setSuccess(`Allocated ${allocQty} to ${code}.`);
       setAllocating(null);
     } catch (err) {
       setError(err.message);
@@ -532,16 +533,19 @@ function PendingLocationTable({ lines, locations, canEdit, userEmail }) {
                         <div className="flex flex-wrap items-end gap-3">
                           <div>
                             <label className="block text-xs text-gray-500 mb-1">Location</label>
-                            <select
+                            <input
+                              type="text"
+                              list="pending-location-suggestions"
                               value={allocLocation}
                               onChange={(e) => setAllocLocation(e.target.value)}
-                              className="px-2 py-1 border rounded text-sm"
-                            >
-                              <option value="">Select...</option>
+                              placeholder="e.g. B6-R3"
+                              className="w-40 px-2 py-1 border rounded text-sm uppercase"
+                            />
+                            <datalist id="pending-location-suggestions">
                               {activeLocations.map((loc) => (
-                                <option key={loc.id} value={loc.locationCode}>{loc.locationCode}</option>
+                                <option key={loc.id} value={loc.locationCode} />
                               ))}
-                            </select>
+                            </datalist>
                           </div>
                           <div>
                             <label className="block text-xs text-gray-500 mb-1">Quantity</label>
