@@ -128,7 +128,15 @@ export default function Warehouse({ userRole, userEmail }) {
         />
       </div>
 
-      {tab === 'putaway' && <PutawayReportTable lines={filteredLines} itemsById={itemsById} locations={locations} />}
+      {tab === 'putaway' && (
+        <PutawayReportTable
+          lines={filteredLines}
+          itemsById={itemsById}
+          locations={locations}
+          canEdit={canEdit}
+          userEmail={userEmail}
+        />
+      )}
       {tab === 'pending' && (
         <PendingLocationTable
           lines={pendingLines}
@@ -150,7 +158,47 @@ function download(filename, rows) {
   XLSX.writeFile(wb, filename);
 }
 
-function PutawayReportTable({ lines, itemsById, locations }) {
+function PutawayReportTable({ lines, itemsById, locations, canEdit, userEmail }) {
+  const [allocating, setAllocating] = useState(null); // line id being allocated
+  const [allocLocation, setAllocLocation] = useState('');
+  const [allocQty, setAllocQty] = useState('');
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const startAllocate = (line) => {
+    setAllocating(line.id);
+    setAllocLocation('');
+    setAllocQty(String(line.pendingQty || line.receivedQty || ''));
+    setError('');
+    setSuccess('');
+  };
+
+  const submitAllocate = async (line) => {
+    setError('');
+    const code = allocLocation.trim().toUpperCase();
+    if (!code) {
+      setError('Type a location code.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await applyLocationAllocation({
+        line,
+        locationCode: code,
+        qty: allocQty,
+        userEmail,
+        action: 'LOCATION_CHANGE',
+      });
+      setSuccess(`Allocated ${allocQty} to ${code}.`);
+      setAllocating(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const exportReport = () => {
     download(
       `putaway_report_${new Date().toISOString().slice(0, 10)}.xlsx`,
@@ -190,6 +238,8 @@ function PutawayReportTable({ lines, itemsById, locations }) {
           <Download size={16} /> Export
         </button>
       </div>
+      {error && <div className="mx-4 mt-4 bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
+      {success && <div className="mx-4 mt-4 bg-green-50 border border-green-200 text-green-700 px-4 py-2 rounded text-sm">{success}</div>}
       <table className="w-full text-sm">
         <thead className="bg-gray-50 border-b">
           <tr>
@@ -210,27 +260,83 @@ function PutawayReportTable({ lines, itemsById, locations }) {
           {lines.map((l) => {
             const item = itemsById[l.itemId] || {};
             const badge = ageingColour(l);
+            const clickable = canEdit && l.status !== LOCATION_STATUS.COMPLETE;
             return (
-              <tr key={l.id} className="border-b last:border-0 hover:bg-gray-50">
-                <td className="px-3 py-2">{l.invoiceNumber}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{l.invoiceDate}</td>
-                <td className="px-3 py-2">{l.supplier || '—'}</td>
-                <td className="px-3 py-2 font-medium text-gray-800">{l.description}</td>
-                <td className="px-3 py-2 text-right">{l.receivedQty}</td>
-                <td className="px-3 py-2 text-right">{item.currentStock ?? '—'}</td>
-                <td className="px-3 py-2 text-xs">
-                  {(l.allocations || []).length === 0
-                    ? '—'
-                    : l.allocations.map((a) => `${a.locationCode} (${a.qty})`).join(', ')}
-                </td>
-                <td className="px-3 py-2">
-                  <span className={`px-2 py-1 rounded-full text-xs font-medium border ${badge.color}`}>{l.status}</span>
-                </td>
-              </tr>
+              <React.Fragment key={l.id}>
+                <tr className="border-b last:border-0 hover:bg-gray-50">
+                  <td className="px-3 py-2">{l.invoiceNumber}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{l.invoiceDate}</td>
+                  <td className="px-3 py-2">{l.supplier || '—'}</td>
+                  <td className="px-3 py-2 font-medium text-gray-800">{l.description}</td>
+                  <td className="px-3 py-2 text-right">{l.receivedQty}</td>
+                  <td className="px-3 py-2 text-right">{item.currentStock ?? '—'}</td>
+                  <td className="px-3 py-2 text-xs">
+                    {(l.allocations || []).length === 0
+                      ? '—'
+                      : l.allocations.map((a) => `${a.locationCode} (${a.qty})`).join(', ')}
+                  </td>
+                  <td className="px-3 py-2">
+                    {clickable ? (
+                      <button
+                        type="button"
+                        onClick={() => startAllocate(l)}
+                        title="Click to enter the location manually"
+                        className={`px-2 py-1 rounded-full text-xs font-medium border ${badge.color} hover:opacity-75 cursor-pointer`}
+                      >
+                        {l.status}
+                      </button>
+                    ) : (
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium border ${badge.color}`}>{l.status}</span>
+                    )}
+                  </td>
+                </tr>
+                {allocating === l.id && (
+                  <tr className="bg-emerald-50">
+                    <td colSpan={8} className="px-3 py-3">
+                      <div className="flex flex-wrap items-end gap-3">
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Location (type manually)</label>
+                          <input
+                            type="text"
+                            list="putaway-location-suggestions"
+                            value={allocLocation}
+                            onChange={(e) => setAllocLocation(e.target.value)}
+                            placeholder="e.g. B6-R3"
+                            autoFocus
+                            className="w-40 px-2 py-1 border rounded text-sm uppercase"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Quantity</label>
+                          <input
+                            type="number"
+                            value={allocQty}
+                            onChange={(e) => setAllocQty(e.target.value)}
+                            className="w-24 px-2 py-1 border rounded text-sm"
+                          />
+                        </div>
+                        <button
+                          onClick={() => submitAllocate(l)}
+                          disabled={busy}
+                          className="bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-medium px-3 py-1.5 rounded disabled:opacity-50"
+                        >
+                          Save
+                        </button>
+                        <button onClick={() => setAllocating(null)} className="text-gray-500 text-sm">Cancel</button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
             );
           })}
         </tbody>
       </table>
+      <datalist id="putaway-location-suggestions">
+        {locations.map((loc) => (
+          <option key={loc.id} value={loc.locationCode} />
+        ))}
+      </datalist>
     </div>
   );
 }
