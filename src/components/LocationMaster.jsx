@@ -9,8 +9,9 @@ import {
   updateDoc,
   doc,
   serverTimestamp,
+  writeBatch,
 } from 'firebase/firestore';
-import { Warehouse, Plus, Pencil, Copy, X, ShieldAlert } from 'lucide-react';
+import { Warehouse, Plus, Pencil, Copy, X, ShieldAlert, Layers } from 'lucide-react';
 import { matchesLoose } from '../lib/brands';
 
 function buildLocationCode({ rack, shelf, bin }) {
@@ -26,6 +27,10 @@ export default function LocationMaster({ userRole }) {
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const [showBulk, setShowBulk] = useState(false);
+  const [bulkText, setBulkText] = useState('');
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkResult, setBulkResult] = useState('');
 
   const canEdit = userRole === 'admin' || userRole === 'inventory_manager';
 
@@ -133,6 +138,70 @@ export default function LocationMaster({ userRole }) {
     }
   };
 
+  // Bulk Add — paste one location/rack code per line and create them all in
+  // a single writeBatch. Built for backfilling Location Master from codes
+  // already scattered across item Rack No fields (one round trip instead of
+  // one write per line, which is what makes the difference on a slow
+  // connection — Firestore writes here can take many seconds each).
+  const handleBulkAdd = async () => {
+    setBulkResult('');
+    const lines = bulkText
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length === 0) {
+      setBulkResult('Nothing to add — paste at least one location code.');
+      return;
+    }
+    const existingCodes = new Set(locations.map((l) => l.locationCode));
+    const seenThisBatch = new Set();
+    const toAdd = [];
+    let skipped = 0;
+    for (const raw of lines) {
+      const rack = raw.trim();
+      const code = buildLocationCode({ rack, shelf: '', bin: '' });
+      if (!code || existingCodes.has(code) || seenThisBatch.has(code)) {
+        skipped += 1;
+        continue;
+      }
+      seenThisBatch.add(code);
+      toAdd.push({ rack, code });
+    }
+    if (toAdd.length === 0) {
+      setBulkResult(`Nothing new to add — all ${lines.length} line(s) already exist in Location Master.`);
+      return;
+    }
+    setBulkBusy(true);
+    try {
+      const CHUNK = 400; // Firestore writeBatch limit is 500 ops
+      for (let i = 0; i < toAdd.length; i += CHUNK) {
+        const batch = writeBatch(db);
+        toAdd.slice(i, i + CHUNK).forEach(({ rack, code }) => {
+          const ref = doc(collection(db, 'locations'));
+          batch.set(ref, {
+            warehouse: '',
+            rack,
+            shelf: '',
+            bin: '',
+            locationCode: code,
+            maxCapacity: 0,
+            currentOccupancy: 0,
+            status: 'ACTIVE',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        });
+        await batch.commit();
+      }
+      setBulkResult(`Added ${toAdd.length} location(s).${skipped ? ` Skipped ${skipped} duplicate/blank line(s).` : ''}`);
+      setBulkText('');
+    } catch (err) {
+      setBulkResult('Failed: ' + err.message);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const filtered = locations.filter((l) => matchesLoose([l.locationCode, l.warehouse, l.rack], search));
 
   return (
@@ -143,12 +212,20 @@ export default function LocationMaster({ userRole }) {
           <h1 className="text-3xl font-bold text-gray-800">Location Master</h1>
         </div>
         {canEdit && (
-          <button
-            onClick={openAdd}
-            className="flex items-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg"
-          >
-            <Plus size={18} /> Add Location
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { setShowBulk((v) => !v); setBulkResult(''); }}
+              className="flex items-center gap-2 border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50 font-bold py-2 px-4 rounded-lg"
+            >
+              <Layers size={18} /> Bulk Add
+            </button>
+            <button
+              onClick={openAdd}
+              className="flex items-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2 px-4 rounded-lg"
+            >
+              <Plus size={18} /> Add Location
+            </button>
+          </div>
         )}
       </div>
       <p className="text-gray-500 text-sm max-w-2xl">
@@ -156,6 +233,32 @@ export default function LocationMaster({ userRole }) {
         choices when completing the Put-away Location Report, and their occupancy updates automatically as stock
         is put away.
       </p>
+
+      {showBulk && (
+        <div className="bg-white rounded-xl shadow p-5 space-y-3 max-w-2xl">
+          <p className="text-sm text-gray-600">
+            Paste one location/rack code per line — each becomes its own Location Master entry (Rack field = the
+            line, Warehouse/Shelf/Bin left blank). Duplicates of existing codes are skipped automatically.
+          </p>
+          <textarea
+            value={bulkText}
+            onChange={(e) => setBulkText(e.target.value)}
+            rows={8}
+            placeholder={'B5/R2\nWooden Bureau NO 8\nOut Side BOX No 1\n...'}
+            className="w-full px-3 py-2 border rounded-lg font-mono text-sm"
+          />
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleBulkAdd}
+              disabled={bulkBusy}
+              className="bg-emerald-700 hover:bg-emerald-800 text-white font-medium px-4 py-2 rounded-lg disabled:opacity-50"
+            >
+              {bulkBusy ? 'Adding...' : 'Add All'}
+            </button>
+            {bulkResult && <span className="text-sm text-gray-600">{bulkResult}</span>}
+          </div>
+        </div>
+      )}
 
       <input
         type="text"
