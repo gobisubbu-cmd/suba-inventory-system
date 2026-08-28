@@ -4,6 +4,7 @@ import { collection, onSnapshot, orderBy, query, doc, runTransaction, serverTime
 import { SlidersHorizontal, ShieldAlert } from 'lucide-react';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
 import { logActivity } from '../lib/activityLog';
+import MobileItemPicker from './MobileItemPicker';
 
 export default function StockAdjustment({ userRole, userEmail }) {
   const [items, setItems] = useState([]);
@@ -112,17 +113,12 @@ export default function StockAdjustment({ userRole, userEmail }) {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Item</label>
-            <select
+            <MobileItemPicker
+              items={items}
               value={itemId}
-              onChange={(e) => setItemId(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:border-emerald-600"
-              required
-            >
-              <option value="">Select an item...</option>
-              {items.map((it) => (
-                <option key={it.id} value={it.id}>{it.particulars} (current: {it.currentStock})</option>
-              ))}
-            </select>
+              onChange={setItemId}
+              placeholder="Select an item..."
+            />
           </div>
           {selectedItem && (
             <p className="text-sm text-gray-500">Current stock: {selectedItem.currentStock} {selectedItem.unit}</p>

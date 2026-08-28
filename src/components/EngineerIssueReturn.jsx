@@ -13,6 +13,7 @@ import {
 import { HardHat, Plus, Trash2, PackageMinus, PackagePlus, Wrench, ClipboardList } from 'lucide-react';
 import { checkAndSendLowStockAlert } from '../lowStockAlert';
 import { logActivity } from '../lib/activityLog';
+import MobileItemPicker from './MobileItemPicker';
 
 const CONDITIONS = ['New', 'Used', 'Damaged'];
 const WARRANTY_OPTIONS = ['Warranty', 'Chargeable'];
@@ -104,14 +105,14 @@ function LineItemsEditor({ lines, setLines, items, qtyLabel = 'Qty' }) {
         const item = items.find((it) => it.id === l.itemId);
         return (
           <div key={idx} className="flex items-center gap-2">
-            <select value={l.itemId} onChange={(e) => update(idx, 'itemId', e.target.value)} className="flex-1 px-3 py-2 border rounded-lg">
-              <option value="">Select spare part...</option>
-              {sorted.map((it) => (
-                <option key={it.id} value={it.id}>
-                  {it.brand ? `[${it.brand}] ` : ''}{it.partNumber || it.partCode || ''} — {it.particulars} (stock: {it.currentStock})
-                </option>
-              ))}
-            </select>
+            <div className="flex-1">
+              <MobileItemPicker
+                items={sorted}
+                value={l.itemId}
+                onChange={(id) => update(idx, 'itemId', id)}
+                placeholder="Select spare part..."
+              />
+            </div>
             <input
               type="number"
               placeholder={qtyLabel}
@@ -349,12 +350,14 @@ function ReturnForm({ items, issues, userEmail, disabled }) {
         <div className="space-y-2">
           {lines.map((l, idx) => (
             <div key={idx} className="flex items-center gap-2">
-              <select value={l.itemId} onChange={(e) => updateLine(idx, 'itemId', e.target.value)} className="flex-1 px-3 py-2 border rounded-lg">
-                <option value="">Select spare part...</option>
-                {sortedItems.map((it) => (
-                  <option key={it.id} value={it.id}>{it.brand ? `[${it.brand}] ` : ''}{it.partNumber || it.partCode || ''} — {it.particulars}</option>
-                ))}
-              </select>
+              <div className="flex-1">
+                <MobileItemPicker
+                  items={sortedItems}
+                  value={l.itemId}
+                  onChange={(id) => updateLine(idx, 'itemId', id)}
+                  placeholder="Select spare part..."
+                />
+              </div>
               <input type="number" placeholder="Qty Returned" value={l.qty} onChange={(e) => updateLine(idx, 'qty', e.target.value)} className="w-32 px-3 py-2 border rounded-lg" />
               <select value={l.condition} onChange={(e) => updateLine(idx, 'condition', e.target.value)} className="w-32 px-3 py-2 border rounded-lg">
                 {CONDITIONS.map((c) => <option key={c} value={c}>{c}</option>)}
@@ -475,12 +478,14 @@ function UsedForm({ items, userEmail, disabled }) {
         <div className="space-y-2">
           {lines.map((l, idx) => (
             <div key={idx} className="flex items-center gap-2 flex-wrap">
-              <select value={l.itemId} onChange={(e) => updateLine(idx, 'itemId', e.target.value)} className="flex-1 min-w-[220px] px-3 py-2 border rounded-lg">
-                <option value="">Select spare part...</option>
-                {sortedItems.map((it) => (
-                  <option key={it.id} value={it.id}>{it.brand ? `[${it.brand}] ` : ''}{it.partNumber || it.partCode || ''} — {it.particulars}</option>
-                ))}
-              </select>
+              <div className="flex-1 min-w-[220px]">
+                <MobileItemPicker
+                  items={sortedItems}
+                  value={l.itemId}
+                  onChange={(id) => updateLine(idx, 'itemId', id)}
+                  placeholder="Select spare part..."
+                />
+              </div>
               <input type="number" placeholder="Qty Used" value={l.qty} onChange={(e) => updateLine(idx, 'qty', e.target.value)} className="w-28 px-3 py-2 border rounded-lg" />
               <select value={l.warrantyOrChargeable} onChange={(e) => updateLine(idx, 'warrantyOrChargeable', e.target.value)} className="w-36 px-3 py-2 border rounded-lg">
                 {WARRANTY_OPTIONS.map((w) => <option key={w} value={w}>{w}</option>)}
