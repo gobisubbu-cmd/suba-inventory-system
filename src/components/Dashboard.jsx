@@ -87,6 +87,8 @@ export default function Dashboard({ userRole, userEmail, initialBrandFilter }) {
       if (!looseTerm) return false;
       return (
         normalizeForLooseMatch(it.particulars).includes(looseTerm) ||
+        normalizeForLooseMatch(it.rackNo).includes(looseTerm) ||
+        normalizeForLooseMatch(it.hsnCode).includes(looseTerm) ||
         [...allPartNumbers(it), it.partCode].some((p) => normalizeForLooseMatch(p).includes(looseTerm))
       );
     });
