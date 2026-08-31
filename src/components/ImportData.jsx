@@ -82,6 +82,23 @@ const MOVEMENT_TYPES = [
 // of silently trusting the auto-detected (usually outward) direction.
 const OWN_BUSINESS_NAME_HINTS = ['suba'];
 
+// PERMANENT EXCEPTION (per owner instruction, 31 Aug 2026): SUBA CARE is a
+// separately/individually managed branch — a real outward customer, not a
+// duplicate of this business. A document naming SUBA CARE as the party
+// contains "suba" and would otherwise trip the own-business auto-correction
+// above, silently flipping a genuine Sale/DC-Out into a Purchase/Return-In
+// and inflating stock instead of reducing it. Any party name matching one of
+// these is always treated as a real external party — never auto-corrected
+// to inward — regardless of the OWN_BUSINESS_NAME_HINTS match.
+const OWN_BUSINESS_NAME_EXCEPTIONS = ['suba care'];
+
+function isOwnBusinessParty(partyName) {
+  const name = String(partyName || '').toLowerCase();
+  if (!name) return false;
+  if (OWN_BUSINESS_NAME_EXCEPTIONS.some((ex) => name.includes(ex))) return false;
+  return OWN_BUSINESS_NAME_HINTS.some((hint) => name.includes(hint));
+}
+
 function normalizeHeader(h) {
   return String(h || '').trim().toLowerCase();
 }
@@ -1489,11 +1506,9 @@ function MovementImport({ existingItems, userEmail }) {
 
   // See OWN_BUSINESS_NAME_HINTS above — a document whose detected party
   // name matches your own business is a strong sign this is actually an
-  // inward delivery, not the outward movement the scan assumed.
-  const partyLooksLikeOwnBusiness = Boolean(
-    detectedMeta?.partyName &&
-      OWN_BUSINESS_NAME_HINTS.some((hint) => detectedMeta.partyName.toLowerCase().includes(hint))
-  );
+  // inward delivery, not the outward movement the scan assumed. (SUBA CARE
+  // is excluded — see OWN_BUSINESS_NAME_EXCEPTIONS.)
+  const partyLooksLikeOwnBusiness = isOwnBusinessParty(detectedMeta?.partyName);
 
   useEffect(() => {
     setConfirmDuplicate(false);
@@ -1610,9 +1625,7 @@ function MovementImport({ existingItems, userEmail }) {
       let effectiveDocType = meta?.documentType || null;
       let autoCorrectedFrom = null;
       if (meta?.documentType && MOVEMENT_TYPES.some((m) => m.id === meta.documentType)) {
-        const partyLooksOwn = Boolean(
-          meta.partyName && OWN_BUSINESS_NAME_HINTS.some((hint) => meta.partyName.toLowerCase().includes(hint))
-        );
+        const partyLooksOwn = isOwnBusinessParty(meta.partyName);
         const outwardToInward = { dc: 'purchase', issue: 'return' };
         if (partyLooksOwn && outwardToInward[meta.documentType]) {
           autoCorrectedFrom = meta.documentType;
