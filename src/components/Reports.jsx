@@ -69,6 +69,23 @@ function colorForBrand(brand) {
   return BRAND_COLOR_PALETTE[idx];
 }
 
+// Movement `type` on each transaction already distinguishes a literal
+// Delivery Challan ('dc') from a literal Invoice ('issue') on the outward
+// side (see ImportData.jsx's document-type detection), and a Purchase
+// Invoice/Order/Bill ('purchase') from a Return/Credit Note ('return') on
+// the inward side. Module-level constants — not recreated every render, and
+// stable identities for the useMemo below.
+const DOC_TYPE_LABELS = {
+  dc: 'DC',
+  issue: 'Invoice / Sales',
+  purchase: 'Purchase Invoice',
+  return: 'Return / DC (Inward)',
+};
+const DOC_TYPES_BY_DIRECTION = {
+  out: ['dc', 'issue'],
+  in: ['purchase', 'return'],
+};
+
 function download(filename, rows) {
   // json_to_sheet([]) produces a totally blank sheet with no header row at
   // all, which looks exactly like a broken/failed export. Make a genuinely
@@ -127,6 +144,17 @@ export default function Reports({ userRole, userEmail, exportBrands }) {
   const [ioStartDate, setIoStartDate] = useState('');
   const [ioEndDate, setIoEndDate] = useState('');
   const [showMovementModal, setShowMovementModal] = useState(false);
+
+  // --- Document Register: DC / Invoice (out) and DC / Purchase Invoice (in) ---
+  // One row per document (reference number), not per line item — the list
+  // a person actually wants when asking "what DCs/invoices did we raise this
+  // week", with drill-down to the line items on click.
+  const [docRegDirection, setDocRegDirection] = useState('out');
+  const [docRegType, setDocRegType] = useState('all');
+  const [docRegSearch, setDocRegSearch] = useState('');
+  const [docRegStartDate, setDocRegStartDate] = useState('');
+  const [docRegEndDate, setDocRegEndDate] = useState('');
+  const [selectedDoc, setSelectedDoc] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteReason, setDeleteReason] = useState('');
   const [deleteError, setDeleteError] = useState('');
@@ -248,6 +276,72 @@ export default function Reports({ userRole, userEmail, exportBrands }) {
     items.forEach((it) => map.set(it.id, it));
     return map;
   }, [items]);
+
+  // One row per (type, reference number) — every line item recorded under
+  // that document rolled into a single summary row: date (earliest line's
+  // transaction date), party (first non-blank supplier/customer name seen),
+  // item count, total quantity, total value (only where every line has a
+  // unit cost; otherwise left blank rather than silently understating it).
+  const documentRegister = useMemo(() => {
+    const groups = new Map();
+    transactions.forEach((t) => {
+      if (!DOC_TYPES_BY_DIRECTION[t.direction]?.includes(t.type)) return;
+      const key = `${t.type}||${(t.reason && t.reason.trim()) || '(No reference number)'}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          type: t.type,
+          direction: t.direction,
+          reason: (t.reason && t.reason.trim()) || '(No reference number)',
+          party: '',
+          date: null,
+          lines: [],
+        });
+      }
+      const g = groups.get(key);
+      if (!g.party) g.party = t.supplier || t.customerName || '';
+      const d = effectiveDate(t);
+      if (d && (!g.date || d < g.date)) g.date = d;
+      g.lines.push(t);
+    });
+    return Array.from(groups.values())
+      .map((g) => ({
+        ...g,
+        itemCount: g.lines.length,
+        totalQty: g.lines.reduce((s, t) => s + (Number(t.quantity) || 0), 0),
+        totalValue: g.lines.every((t) => t.unitCost !== null && t.unitCost !== undefined && t.unitCost !== '')
+          ? g.lines.reduce((s, t) => s + (Number(t.unitCost) || 0) * (Number(t.quantity) || 0), 0)
+          : null,
+      }))
+      .sort((a, b) => (b.date?.getTime() || 0) - (a.date?.getTime() || 0));
+  }, [transactions]);
+
+  const filteredDocumentRegister = useMemo(() => {
+    const s = docRegSearch.trim().toLowerCase();
+    const start = docRegStartDate ? new Date(docRegStartDate) : null;
+    const end = docRegEndDate ? new Date(docRegEndDate + 'T23:59:59') : null;
+    return documentRegister.filter((g) => {
+      if (g.direction !== docRegDirection) return false;
+      if (docRegType !== 'all' && g.type !== docRegType) return false;
+      if (start && (!g.date || g.date < start)) return false;
+      if (end && (!g.date || g.date > end)) return false;
+      if (s && !g.reason.toLowerCase().includes(s) && !g.party.toLowerCase().includes(s)) return false;
+      return true;
+    });
+  }, [documentRegister, docRegDirection, docRegType, docRegSearch, docRegStartDate, docRegEndDate]);
+
+  function exportDocumentRegister() {
+    const rows = filteredDocumentRegister.map((g) => ({
+      Date: g.date ? g.date.toLocaleDateString() : '',
+      'Reference / Doc No.': g.reason,
+      Type: DOC_TYPE_LABELS[g.type] || g.type,
+      'Supplier / Customer': g.party,
+      Items: g.itemCount,
+      'Total Qty': g.totalQty,
+      ...(canSeeValue ? { 'Total Value': g.totalValue ?? '' } : {}),
+    }));
+    download(`document_register_${docRegDirection}.xlsx`, rows);
+  }
 
   function exportDirectionRollup(direction, groupLabel, keyFn, filename) {
     const rows = ioFilteredTxns.filter((t) => t.direction === direction);
@@ -1039,6 +1133,183 @@ export default function Reports({ userRole, userEmail, exportBrands }) {
           <ReportButton disabled={!dataReady} label="All Transactions (raw)" onClick={() => exportMovements(null)} />
         </div>
       </div>
+
+      <div className="bg-white rounded-lg shadow p-6 space-y-4">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="font-semibold text-gray-800">Document Register — DC &amp; Invoice-wise</h2>
+          <ReportButton disabled={!dataReady || filteredDocumentRegister.length === 0} label="Export List" onClick={exportDocumentRegister} />
+        </div>
+        <p className="text-xs text-gray-400">
+          One row per DC / Invoice, date-wise — not per line item. Click any row to see every part on that document.
+          Outward splits into <strong>DC</strong> (a document literally detected as a Delivery Challan) and{' '}
+          <strong>Invoice / Sales</strong> (detected as a Tax/Sale Invoice). Inward splits into{' '}
+          <strong>Purchase Invoice</strong> and <strong>Return / DC (Inward)</strong> the same way. Stock Adjustments
+          have no document number, so they don't appear here — see Quick Reports for those.
+        </p>
+
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex rounded-lg border overflow-hidden">
+            <button
+              onClick={() => { setDocRegDirection('out'); setDocRegType('all'); }}
+              className={`px-4 py-2 text-sm font-medium ${docRegDirection === 'out' ? 'bg-emerald-700 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+            >
+              Outward (DC / Invoice)
+            </button>
+            <button
+              onClick={() => { setDocRegDirection('in'); setDocRegType('all'); }}
+              className={`px-4 py-2 text-sm font-medium border-l ${docRegDirection === 'in' ? 'bg-emerald-700 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+            >
+              Inward (DC / Purchase Invoice)
+            </button>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+            <select value={docRegType} onChange={(e) => setDocRegType(e.target.value)} className="px-3 py-2 border rounded-lg text-sm">
+              <option value="all">All</option>
+              {DOC_TYPES_BY_DIRECTION[docRegDirection].map((t) => (
+                <option key={t} value={t}>{DOC_TYPE_LABELS[t]}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+            <input type="date" value={docRegStartDate} onChange={(e) => setDocRegStartDate(e.target.value)} className="px-3 py-2 border rounded-lg text-sm" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+            <input type="date" value={docRegEndDate} onChange={(e) => setDocRegEndDate(e.target.value)} className="px-3 py-2 border rounded-lg text-sm" />
+          </div>
+          <div className="flex-1 min-w-[180px]">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Search Ref / Party</label>
+            <input
+              type="text"
+              value={docRegSearch}
+              onChange={(e) => setDocRegSearch(e.target.value)}
+              placeholder="e.g. SK219, SUBA CARE..."
+              className="w-full px-3 py-2 border rounded-lg text-sm"
+            />
+          </div>
+          <span className="text-sm text-gray-500 pb-2">{filteredDocumentRegister.length} document(s)</span>
+        </div>
+
+        <div className="border rounded-lg overflow-hidden">
+          <div className="max-h-96 overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 border-b sticky top-0">
+                <tr>
+                  <th className="text-left px-4 py-3 font-semibold text-gray-600">Date</th>
+                  <th className="text-left px-4 py-3 font-semibold text-gray-600">Reference / Doc No.</th>
+                  <th className="text-left px-4 py-3 font-semibold text-gray-600">Type</th>
+                  <th className="text-left px-4 py-3 font-semibold text-gray-600">Supplier / Customer</th>
+                  <th className="text-right px-4 py-3 font-semibold text-gray-600">Items</th>
+                  <th className="text-right px-4 py-3 font-semibold text-gray-600">Total Qty</th>
+                  {canSeeValue && <th className="text-right px-4 py-3 font-semibold text-gray-600">Total Value</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredDocumentRegister.map((g) => (
+                  <tr
+                    key={g.key}
+                    onClick={() => setSelectedDoc(g)}
+                    className="border-b last:border-0 hover:bg-emerald-50 cursor-pointer"
+                  >
+                    <td className="px-4 py-3">{g.date ? g.date.toLocaleDateString() : ''}</td>
+                    <td className="px-4 py-3 font-medium text-emerald-700">{g.reason}</td>
+                    <td className="px-4 py-3">
+                      <span className="inline-block bg-gray-100 text-gray-700 text-xs font-semibold px-2 py-1 rounded">
+                        {DOC_TYPE_LABELS[g.type] || g.type}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">{g.party || <span className="text-gray-300 italic">—</span>}</td>
+                    <td className="px-4 py-3 text-right">{g.itemCount}</td>
+                    <td className="px-4 py-3 text-right">{g.totalQty}</td>
+                    {canSeeValue && (
+                      <td className="px-4 py-3 text-right">
+                        {g.totalValue !== null ? `₹${g.totalValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+                {filteredDocumentRegister.length === 0 && (
+                  <tr>
+                    <td colSpan={canSeeValue ? 7 : 6} className="px-4 py-8 text-center text-gray-400">
+                      {dataReady ? 'No documents match these filters.' : 'Loading...'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {selectedDoc && (
+        <div
+          className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+          onClick={() => setSelectedDoc(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b shrink-0">
+              <div>
+                <h3 className="font-semibold text-gray-800 text-lg">{selectedDoc.reason}</h3>
+                <p className="text-sm text-gray-500">
+                  {DOC_TYPE_LABELS[selectedDoc.type] || selectedDoc.type} · {selectedDoc.date ? selectedDoc.date.toLocaleDateString() : ''}
+                  {selectedDoc.party ? ` · ${selectedDoc.party}` : ''}
+                </p>
+              </div>
+              <button onClick={() => setSelectedDoc(null)} className="text-gray-400 hover:text-gray-700 p-1">
+                <X size={22} />
+              </button>
+            </div>
+            <div className="overflow-auto p-6">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b sticky top-0">
+                  <tr>
+                    <th className="text-left px-4 py-3 font-semibold text-gray-600">Brand</th>
+                    <th className="text-left px-4 py-3 font-semibold text-gray-600">Item</th>
+                    <th className="text-right px-4 py-3 font-semibold text-gray-600">Qty</th>
+                    {canSeeValue && <th className="text-right px-4 py-3 font-semibold text-gray-600">Unit Cost</th>}
+                    {canSeeValue && <th className="text-right px-4 py-3 font-semibold text-gray-600">Value</th>}
+                    <th className="text-left px-4 py-3 font-semibold text-gray-600">By</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedDoc.lines.map((t) => (
+                    <tr key={t.id} className="border-b last:border-0">
+                      <td className="px-4 py-3 text-gray-500">{t.brand || ''}</td>
+                      <td className="px-4 py-3">{t.itemName}</td>
+                      <td className="px-4 py-3 text-right">{t.quantity}</td>
+                      {canSeeValue && <td className="px-4 py-3 text-right">{t.unitCost ?? '—'}</td>}
+                      {canSeeValue && (
+                        <td className="px-4 py-3 text-right">
+                          {t.unitCost ? `₹${(Number(t.unitCost) * Number(t.quantity)).toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
+                        </td>
+                      )}
+                      <td className="px-4 py-3 text-gray-500">{t.performedByEmail}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                {canSeeValue && (
+                  <tfoot>
+                    <tr className="border-t-2 font-semibold">
+                      <td className="px-4 py-3" colSpan={2}>Total</td>
+                      <td className="px-4 py-3 text-right">{selectedDoc.totalQty}</td>
+                      <td></td>
+                      <td className="px-4 py-3 text-right">
+                        {selectedDoc.totalValue !== null ? `₹${selectedDoc.totalValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
+                      </td>
+                      <td></td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="bg-white rounded-lg shadow p-6 space-y-4">
         <h2 className="font-semibold text-gray-800">Brand &amp; Master Catalogue Reports</h2>
