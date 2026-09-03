@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Home } from 'lucide-react';
+import { Home, ArrowLeft } from 'lucide-react';
 import { auth, db } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
@@ -272,6 +272,21 @@ export default function App() {
         exportBrands={exportBrands}
       />
       <main className="flex-1 overflow-auto relative">
+        {/* Explicit "go to the previous screen" control, separate from the
+            "Dashboard" pill (which always jumps home). Every page change —
+            including sidebar clicks — pushes a browser-history entry (see
+            the history wiring above), so this is a real "previous page"
+            step, not just another way to reach the Dashboard. Shown on
+            every page, including the Dashboard itself, since "previous"
+            can be meaningful there too (e.g. hopping back to Brands). */}
+        <button
+          onClick={() => window.history.back()}
+          title="Back to the previous screen"
+          className="fixed top-4 left-[272px] z-40 flex items-center gap-2 bg-white shadow-lg border border-gray-200 hover:bg-gray-50 hover:border-gray-300 text-gray-600 pl-3 pr-4 py-2 rounded-full transition"
+        >
+          <ArrowLeft size={18} />
+          <span className="text-sm font-medium">Back</span>
+        </button>
         {currentView !== 'dashboard' && (
           <button
             onClick={goToDashboard}
