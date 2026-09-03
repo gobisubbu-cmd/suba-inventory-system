@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Home } from 'lucide-react';
 import { auth, db } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -63,6 +63,38 @@ export default function App() {
   // "brand::timestamp" token so Dashboard's effect fires even if the same
   // brand is clicked twice in a row. See goToDashboardFiltered below.
   const [dashboardBrandFilter, setDashboardBrandFilter] = useState(null);
+
+  // Every on-screen page already has its own way back (sidebar, the
+  // floating Dashboard pill, or an exit/back button in Field Mode) — but
+  // none of that helps when someone uses their phone's hardware/gesture
+  // Back button, because this app is a single URL with no routing, so
+  // browser Back had nothing to step through and just left the app
+  // entirely. This wires currentView into the browser's history stack:
+  // every view change pushes an entry, and Back/Forward replays them, so
+  // the phone's native Back button now behaves like an in-app Back button
+  // everywhere, on top of the explicit on-screen buttons that already exist.
+  const hasMountedHistoryRef = useRef(false);
+  const isPoppingRef = useRef(false);
+  useEffect(() => {
+    if (!hasMountedHistoryRef.current) {
+      hasMountedHistoryRef.current = true;
+      window.history.replaceState({ view: currentView }, '');
+      return;
+    }
+    if (isPoppingRef.current) {
+      isPoppingRef.current = false;
+      return;
+    }
+    window.history.pushState({ view: currentView }, '');
+  }, [currentView]);
+  useEffect(() => {
+    const onPopState = (e) => {
+      isPoppingRef.current = true;
+      setCurrentView(e.state?.view || 'dashboard');
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
