@@ -65,11 +65,20 @@ const FIELD_ALIASES = {
   notes: ['notes', 'remarks', 'notes / source'],
 };
 
+// PERMANENT FIX (per owner instruction, 3 Sep 2026): the old labels "Issue
+// (Out)" and "Delivery Challan / Sale (Out)" left it unclear which one to
+// pick for an actual Delivery Challan — in practice everyone always picked
+// "Issue (Out)" out of habit regardless of whether the paper document was a
+// DC or a Sales Invoice, so the Document Register (Reports page) could never
+// tell them apart. The labels now name the document directly: pick
+// "Delivery Challan (Out)" when the paper document is a DC, "Sales Invoice
+// (Out)" when it's a Tax/Sale Invoice. The stored `type` values ('dc' /
+// 'issue') are unchanged, so this doesn't touch any historical data.
 const MOVEMENT_TYPES = [
-  { id: 'purchase', label: 'Purchase (In) — stock goes UP', direction: 'in' },
-  { id: 'return', label: 'Return (In) — stock goes UP', direction: 'in' },
-  { id: 'issue', label: 'Issue (Out) — stock goes DOWN', direction: 'out' },
-  { id: 'dc', label: 'Delivery Challan / Sale (Out) — stock goes DOWN', direction: 'out' },
+  { id: 'purchase', label: 'Purchase Invoice (In) — stock goes UP', direction: 'in' },
+  { id: 'return', label: 'Return / Credit Note (In) — stock goes UP', direction: 'in' },
+  { id: 'issue', label: 'Sales Invoice (Out) — stock goes DOWN', direction: 'out' },
+  { id: 'dc', label: 'Delivery Challan (Out) — stock goes DOWN', direction: 'out' },
 ];
 
 // "Delivery Challan" is just a shipping-document type — it does NOT by
@@ -2053,8 +2062,8 @@ function MovementImport({ existingItems, userEmail }) {
               <p className="mt-1">
                 That usually means this document was addressed <strong>TO</strong> you — e.g. a supplier's own
                 Delivery Challan listing you as the consignee. If so, this is an <strong>inward</strong> delivery and
-                Movement Type above should be <strong>Purchase (In)</strong> or <strong>Return (In)</strong>, not
-                Delivery Challan / Sale (Out).
+                Movement Type above should be <strong>Purchase Invoice (In)</strong> or{' '}
+                <strong>Return / Credit Note (In)</strong>, not Delivery Challan (Out).
               </p>
             </div>
           </div>
